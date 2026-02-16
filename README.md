@@ -303,13 +303,61 @@ Create `~/.openclaw/agent-profiles.json` to define role-based agents:
 | Field | Required | Description |
 |---|---|---|
 | `label` | Yes | Display name in Linear comments |
-| `mission` | Yes | Agent's role description (provided as context when dispatched) |
-| `isDefault` | One agent | The default agent handles OAuth app events and assignment triage |
+| `mission` | Yes | Agent's role description (injected as system context when the agent is dispatched) |
+| `isDefault` | One agent | The default agent handles OAuth app events, agent sessions, and assignment triage |
 | `mentionAliases` | Yes | @mention triggers in comments (e.g., `@qa` in a comment routes to the QA agent) |
 | `appAliases` | No | Triggers via OAuth app webhook (default agent only, for app-level @mentions) |
 | `avatarUrl` | No | Avatar displayed on branded comments. Falls back to `[Label]` prefix if not set. |
 
-Each agent ID (the JSON key) must match a configured OpenClaw agent in `openclaw.json`. The plugin dispatches to agents via `openclaw agent --agent <id>`.
+#### How agent-profiles.json connects to openclaw.json
+
+Each key in `agent-profiles.json` (e.g., `"lead"`, `"qa"`) must have a matching agent definition in your OpenClaw config (`~/.openclaw/openclaw.json`). The Linear plugin dispatches work via `openclaw agent --agent <id>`, so the agent must actually exist.
+
+Example — if `agent-profiles.json` defines `"lead"` and `"qa"`, your `openclaw.json` needs:
+
+```json
+{
+  "agents": {
+    "lead": {
+      "model": "claude-sonnet-4-5-20250929",
+      "systemPrompt": "You are a product lead agent...",
+      "tools": ["linear_list_issues", "linear_create_issue", "linear_add_comment"]
+    },
+    "qa": {
+      "model": "claude-sonnet-4-5-20250929",
+      "systemPrompt": "You are a QA engineer agent...",
+      "tools": ["linear_list_issues", "linear_add_comment"]
+    }
+  }
+}
+```
+
+#### Routing flow
+
+```
+Linear comment "@qa review this test plan"
+  → Plugin matches "qa" in mentionAliases
+  → Looks up agent-profiles.json → finds "qa" profile
+  → Dispatches: openclaw agent --agent qa --message "<issue context + comment>"
+  → OpenClaw loads "qa" agent config from openclaw.json
+  → Agent runs with the qa profile's mission as context
+  → Response posted back to Linear as a branded comment with qa's label/avatar
+```
+
+For agent sessions (triggered by the Linear agent UI or app @mentions):
+
+```
+Linear AgentSessionEvent.created
+  → Plugin resolves the default agent (isDefault: true)
+  → Runs the 3-stage pipeline (plan → implement → audit)
+  → Each stage dispatches via the default agent's openclaw.json config
+```
+
+#### What happens if they don't match
+
+- **Agent profile exists but no matching openclaw.json agent:** The dispatch fails and an error is logged. The webhook returns 200 (Linear requirement) but no comment is posted.
+- **openclaw.json agent exists but no profile:** The agent works for direct CLI use but won't be reachable from Linear. No @mention alias maps to it.
+- **No agent marked `isDefault`:** Agent sessions and assignment triage will fail with `"No defaultAgentId"` error.
 
 ### 8. Verify
 
