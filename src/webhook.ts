@@ -844,6 +844,215 @@ export async function handleLinearWebhook(
     return true;
   }
 
+  // ── Issue.create — auto-triage new issues ───────────────────────
+  if (payload.type === "Issue" && payload.action === "create") {
+    res.statusCode = 200;
+    res.end("ok");
+
+    const issue = payload.data;
+    if (!issue?.id) {
+      api.logger.error("Issue.create missing issue data");
+      return true;
+    }
+
+    // Dedup
+    if (wasRecentlyProcessed(`issue-create:${issue.id}`)) {
+      api.logger.info(`Issue.create ${issue.id} already processed — skipping`);
+      return true;
+    }
+
+    api.logger.info(`Issue.create: ${issue.identifier ?? issue.id} — ${issue.title ?? "(untitled)"}`);
+
+    const linearApi = createLinearApi(api);
+    if (!linearApi) {
+      api.logger.error("No Linear access token — cannot triage new issue");
+      return true;
+    }
+
+    const agentId = resolveAgentId(api);
+
+    // Dispatch triage (non-blocking)
+    void (async () => {
+      const profiles = loadAgentProfiles();
+      const defaultProfile = Object.entries(profiles).find(([, p]) => p.isDefault);
+      const label = defaultProfile?.[1]?.label ?? profiles[agentId]?.label ?? agentId;
+      const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
+      let agentSessionId: string | null = null;
+
+      try {
+        // Fetch enriched issue + team labels
+        let enrichedIssue: any = issue;
+        let teamLabels: Array<{ id: string; name: string }> = [];
+        try {
+          enrichedIssue = await linearApi.getIssueDetails(issue.id);
+          if (enrichedIssue?.team?.id) {
+            teamLabels = await linearApi.getTeamLabels(enrichedIssue.team.id);
+          }
+        } catch (err) {
+          api.logger.warn(`Could not fetch issue details for triage: ${err}`);
+        }
+
+        const description = enrichedIssue?.description ?? issue?.description ?? "(no description)";
+        const estimationType = enrichedIssue?.team?.issueEstimationType ?? "fibonacci";
+        const currentLabels = enrichedIssue?.labels?.nodes ?? [];
+        const currentLabelNames = currentLabels.map((l: any) => l.name).join(", ") || "None";
+        const availableLabelList = teamLabels.map((l) => `  - "${l.name}" (id: ${l.id})`).join("\n");
+
+        // Create agent session
+        const sessionResult = await linearApi.createSessionOnIssue(issue.id);
+        agentSessionId = sessionResult.sessionId;
+        if (agentSessionId) {
+          wasRecentlyProcessed(`session:${agentSessionId}`);
+          api.logger.info(`Created agent session ${agentSessionId} for Issue.create triage`);
+        }
+
+        if (agentSessionId) {
+          await linearApi.emitActivity(agentSessionId, {
+            type: "thought",
+            body: `Triaging new issue ${enrichedIssue?.identifier ?? issue.id}...`,
+          }).catch(() => {});
+        }
+
+        if (agentSessionId) {
+          await linearApi.emitActivity(agentSessionId, {
+            type: "action",
+            action: "Triaging",
+            parameter: `${enrichedIssue?.identifier ?? issue.id} — estimating, labeling`,
+          }).catch(() => {});
+        }
+
+        const message = [
+          `IMPORTANT: You are triaging a new Linear issue. You MUST respond with a JSON block containing your triage decisions, followed by your assessment as plain text.`,
+          ``,
+          `## Issue: ${enrichedIssue?.identifier ?? issue.identifier ?? issue.id} — ${enrichedIssue?.title ?? issue.title ?? "(untitled)"}`,
+          `**Status:** ${enrichedIssue?.state?.name ?? "Unknown"} | **Current Estimate:** ${enrichedIssue?.estimate ?? "None"} | **Current Labels:** ${currentLabelNames}`,
+          ``,
+          `**Description:**`,
+          description,
+          ``,
+          `## Your Triage Tasks`,
+          ``,
+          `1. **Story Points** — Estimate complexity using ${estimationType} scale (1=trivial, 2=small, 3=medium, 5=large, 8=very large, 13=epic)`,
+          `2. **Labels** — Select appropriate labels from the team's available labels`,
+          `3. **Priority** — Set priority (1=Urgent, 2=High, 3=Medium, 4=Low) if not already set`,
+          `4. **Assessment** — Brief analysis of what this issue needs`,
+          ``,
+          `## Available Labels`,
+          availableLabelList || "  (no labels configured)",
+          ``,
+          `## Response Format`,
+          ``,
+          `You MUST start your response with a JSON block, then follow with your assessment:`,
+          ``,
+          '```json',
+          `{`,
+          `  "estimate": <number>,`,
+          `  "labelIds": ["<id1>", "<id2>"],`,
+          `  "priority": <number or null>,`,
+          `  "assessment": "<one-line summary of your sizing rationale>"`,
+          `}`,
+          '```',
+          ``,
+          `Then write your full assessment as markdown below the JSON block.`,
+        ].filter(Boolean).join("\n");
+
+        const sessionId = `linear-triage-${issue.id}-${Date.now()}`;
+        const { runAgent } = await import("./agent.js");
+        const result = await runAgent({
+          api,
+          agentId,
+          sessionId,
+          message,
+          timeoutMs: 3 * 60_000,
+        });
+
+        const responseBody = result.success
+          ? result.output
+          : `I encountered an error triaging this issue. Please triage manually.`;
+
+        // Parse triage JSON and apply to issue
+        let commentBody = responseBody;
+        if (result.success) {
+          const jsonMatch = responseBody.match(/```json\s*\n?([\s\S]*?)\n?```/);
+          if (jsonMatch) {
+            try {
+              const triage = JSON.parse(jsonMatch[1]);
+              const updateInput: Record<string, unknown> = {};
+
+              if (typeof triage.estimate === "number") {
+                updateInput.estimate = triage.estimate;
+              }
+              if (Array.isArray(triage.labelIds) && triage.labelIds.length > 0) {
+                const existingIds = currentLabels.map((l: any) => l.id);
+                const allIds = [...new Set([...existingIds, ...triage.labelIds])];
+                updateInput.labelIds = allIds;
+              }
+              if (typeof triage.priority === "number" && triage.priority >= 1 && triage.priority <= 4) {
+                updateInput.priority = triage.priority;
+              }
+
+              if (Object.keys(updateInput).length > 0) {
+                await linearApi.updateIssue(issue.id, updateInput);
+                api.logger.info(`Applied triage to ${enrichedIssue?.identifier ?? issue.id}: ${JSON.stringify(updateInput)}`);
+
+                if (agentSessionId) {
+                  await linearApi.emitActivity(agentSessionId, {
+                    type: "action",
+                    action: "Applied triage",
+                    result: `estimate=${triage.estimate ?? "unchanged"}, labels=${triage.labelIds?.length ?? 0}, priority=${triage.priority ?? "unchanged"}`,
+                  }).catch(() => {});
+                }
+              }
+
+              // Strip JSON block from comment
+              commentBody = responseBody.replace(/```json\s*\n?[\s\S]*?\n?```\s*\n?/, "").trim();
+            } catch (parseErr) {
+              api.logger.warn(`Could not parse triage JSON: ${parseErr}`);
+            }
+          }
+        }
+
+        // Post branded triage comment
+        const brandingOpts = avatarUrl
+          ? { createAsUser: label, displayIconUrl: avatarUrl }
+          : undefined;
+
+        try {
+          if (brandingOpts) {
+            await linearApi.createComment(issue.id, commentBody, brandingOpts);
+          } else {
+            await linearApi.createComment(issue.id, `**[${label}]** ${commentBody}`);
+          }
+        } catch (brandErr) {
+          api.logger.warn(`Branded comment failed, falling back to prefix: ${brandErr}`);
+          await linearApi.createComment(issue.id, `**[${label}]** ${commentBody}`);
+        }
+
+        if (agentSessionId) {
+          const truncated = commentBody.length > 2000
+            ? commentBody.slice(0, 2000) + "…"
+            : commentBody;
+          await linearApi.emitActivity(agentSessionId, {
+            type: "response",
+            body: truncated,
+          }).catch(() => {});
+        }
+
+        api.logger.info(`Triage complete for ${enrichedIssue?.identifier ?? issue.id}`);
+      } catch (err) {
+        api.logger.error(`Issue.create triage error: ${err}`);
+        if (agentSessionId) {
+          await linearApi.emitActivity(agentSessionId, {
+            type: "error",
+            body: `Failed to triage: ${String(err).slice(0, 500)}`,
+          }).catch(() => {});
+        }
+      }
+    })();
+
+    return true;
+  }
+
   // ── Default: log unhandled webhook types for debugging ──────────
   api.logger.warn(`Unhandled webhook type=${payload.type} action=${payload.action} — payload: ${JSON.stringify(payload).slice(0, 500)}`);
   res.statusCode = 200;
