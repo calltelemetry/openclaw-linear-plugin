@@ -10,6 +10,17 @@ Webhook-driven Linear integration with OAuth support, multi-agent routing, and a
 - **App notifications** — Responds to Linear app mentions and assignments via branded comments
 - **Activity tracking** — Emits thought/action/response events visible in Linear's agent session UI
 
+## Quick Install
+
+```bash
+openclaw plugins install @calltelemetry/openclaw-linear
+openclaw gateway restart
+```
+
+That's it — the plugin is installed and enabled. Continue with the [setup steps](#setup) below to configure Linear OAuth and webhooks.
+
+> To install from a local checkout instead: `openclaw plugins install --link /path/to/linear`
+
 ## Prerequisites
 
 - OpenClaw gateway running (systemd service)
@@ -153,13 +164,25 @@ export OPENCLAW_GATEWAY_PORT="18789"  # if non-default
 
 ### 5. Install the Plugin
 
-Add the plugin path to your OpenClaw config (`~/.openclaw/openclaw.json`):
+If you haven't already installed via [Quick Install](#quick-install):
+
+```bash
+openclaw plugins install @calltelemetry/openclaw-linear
+openclaw gateway restart
+```
+
+This registers the plugin in your OpenClaw config and restarts the gateway to load it.
+
+<details>
+<summary>Manual config (advanced)</summary>
+
+If you prefer to manage config by hand, add the plugin path to `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "plugins": {
     "load": {
-      "paths": ["/path/to/claw-extensions/linear"]
+      "paths": ["/path/to/linear"]
     },
     "entries": {
       "linear": {
@@ -170,11 +193,8 @@ Add the plugin path to your OpenClaw config (`~/.openclaw/openclaw.json`):
 }
 ```
 
-Restart the gateway to load the plugin:
-
-```bash
-openclaw gateway restart
-```
+Then restart: `openclaw gateway restart`
+</details>
 
 ### 6. Run the OAuth Flow
 
