@@ -55,6 +55,28 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
+  // Narration Guard: catch short "Let me explore..." responses that narrate intent
+  // without actually calling tools, and append a warning for the user.
+  const NARRATION_PATTERNS = [
+    /let me (explore|look|investigate|check|dig|analyze|search|find|review|examine)/i,
+    /i('ll| will) (explore|look into|investigate|check|dig into|analyze|search|find|review)/i,
+    /let me (take a look|dive into|pull up|go through)/i,
+  ];
+  const MAX_SHORT_RESPONSE = 250;
+
+  api.on("message_sending", (event: { content?: string }) => {
+    const text = event?.content ?? "";
+    if (!text || text.length > MAX_SHORT_RESPONSE) return {};
+    const isNarration = NARRATION_PATTERNS.some((p) => p.test(text));
+    if (!isNarration) return {};
+    api.logger.warn(`Narration guard triggered: "${text.slice(0, 80)}..."`);
+    return {
+      content:
+        text +
+        "\n\n⚠️ _Agent acknowledged but may not have completed the task. Try asking again or rephrase your request._",
+    };
+  });
+
   const agentId = (pluginConfig?.defaultAgentId as string) ?? "default";
   api.logger.info(
     `Linear agent extension registered (agent: ${agentId}, token: ${tokenInfo.source !== "none" ? `${tokenInfo.source}` : "missing"})`,
