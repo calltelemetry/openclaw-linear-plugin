@@ -7,7 +7,7 @@ import { runFullPipeline, type PipelineContext } from "./pipeline.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
 import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch } from "./dispatch-state.js";
 import { assessTier } from "./tier-assess.js";
-import { createWorktree } from "./codex-worktree.js";
+import { createWorktree, prepareWorkspace } from "./codex-worktree.js";
 
 // ── Agent profiles (loaded from config, no hardcoded names) ───────
 interface AgentProfile {
@@ -1194,6 +1194,16 @@ async function handleDispatch(
     return;
   }
 
+  // 5b. Prepare workspace: pull latest from origin + init submodules
+  const prep = prepareWorkspace(worktree.path, worktree.branch);
+  if (prep.errors.length > 0) {
+    api.logger.warn(`@dispatch: workspace prep had errors: ${prep.errors.join("; ")}`);
+  } else {
+    api.logger.info(
+      `@dispatch: workspace prepared — pulled=${prep.pulled}, submodules=${prep.submodulesInitialized}`,
+    );
+  }
+
   // 6. Create agent session on Linear
   let agentSessionId: string | undefined;
   try {
@@ -1227,12 +1237,16 @@ async function handleDispatch(
   });
 
   // 9. Post dispatch confirmation comment
+  const prepStatus = prep.errors.length > 0
+    ? `Workspace prep: partial (${prep.errors.join("; ")})`
+    : `Workspace prep: OK (pulled=${prep.pulled}, submodules=${prep.submodulesInitialized})`;
   const statusComment = [
     `**Dispatched** as **${assessment.tier}** (${assessment.model})`,
     `> ${assessment.reasoning}`,
     ``,
     `Worktree: \`${worktree.path}\` ${worktree.resumed ? "(resumed)" : "(fresh)"}`,
     `Branch: \`${worktree.branch}\``,
+    prepStatus,
   ].join("\n");
 
   await linearApi.createComment(issue.id, statusComment);

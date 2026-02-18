@@ -40,6 +40,14 @@ function git(args: string[], cwd: string): string {
   }).trim();
 }
 
+function gitLong(args: string[], cwd: string, timeout = 120_000): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout,
+  }).trim();
+}
+
 /**
  * Create a git worktree for isolated work on a Linear issue.
  *
@@ -69,6 +77,14 @@ export function createWorktree(
   const branch = `codex/${issueIdentifier}`;
   const worktreePath = path.join(baseDir, issueIdentifier);
 
+  // Fetch latest from origin (best effort) — do this early so both
+  // resume and fresh paths have up-to-date refs.
+  try {
+    git(["fetch", "origin"], repo);
+  } catch {
+    // Offline or no remote — continue with local state
+  }
+
   // Idempotent: if worktree already exists, return it
   if (existsSync(worktreePath)) {
     try {
@@ -81,13 +97,6 @@ export function createWorktree(
         git(["worktree", "remove", "--force", worktreePath], repo);
       } catch { /* best effort */ }
     }
-  }
-
-  // Fetch latest (best effort)
-  try {
-    git(["fetch", "origin"], repo);
-  } catch {
-    // Offline or no remote — continue with local state
   }
 
   // Check if branch already exists (resume scenario)
@@ -283,6 +292,65 @@ export function listWorktrees(opts?: WorktreeOptions): WorktreeEntry[] {
   }
 
   return entries.sort((a, b) => b.ageMs - a.ageMs);
+}
+
+export interface PrepareResult {
+  pulled: boolean;
+  pullOutput?: string;
+  submodulesInitialized: boolean;
+  submoduleOutput?: string;
+  errors: string[];
+}
+
+/**
+ * Prepare a worktree for a code run:
+ *   1. Pull latest from origin for the issue branch (fast-forward only)
+ *   2. Initialize and update all git submodules recursively
+ *
+ * Safe to call on every run — idempotent. Failures are non-fatal;
+ * the code run proceeds even if pull or submodule init fails.
+ */
+export function prepareWorkspace(worktreePath: string, branch: string): PrepareResult {
+  const errors: string[] = [];
+  let pulled = false;
+  let pullOutput: string | undefined;
+  let submodulesInitialized = false;
+  let submoduleOutput: string | undefined;
+
+  // 1. Pull latest from origin (ff-only to avoid merge conflicts)
+  try {
+    // Check if remote branch exists before pulling
+    const remoteBranch = `origin/${branch}`;
+    try {
+      git(["rev-parse", "--verify", remoteBranch], worktreePath);
+      // Remote branch exists — pull latest
+      pullOutput = git(["pull", "--ff-only", "origin", branch], worktreePath);
+      pulled = true;
+    } catch {
+      // Remote branch doesn't exist yet (fresh issue branch) — nothing to pull
+      pullOutput = "remote branch not found, skipping pull";
+    }
+  } catch (err) {
+    const msg = `pull failed: ${err}`;
+    errors.push(msg);
+    pullOutput = msg;
+  }
+
+  // 2. Initialize and update all submodules recursively
+  try {
+    submoduleOutput = gitLong(
+      ["submodule", "update", "--init", "--recursive"],
+      worktreePath,
+      120_000, // submodule clone can take a while
+    );
+    submodulesInitialized = true;
+  } catch (err) {
+    const msg = `submodule init failed: ${err}`;
+    errors.push(msg);
+    submoduleOutput = msg;
+  }
+
+  return { pulled, pullOutput, submodulesInitialized, submoduleOutput, errors };
 }
 
 /**
