@@ -16,6 +16,9 @@ import { hydrateFromDispatchState } from "./active-session.js";
 import {
   readDispatchState,
   listStaleDispatches,
+  listRecoverableDispatches,
+  transitionDispatch,
+  TransitionError,
   removeActiveDispatch,
   pruneCompleted,
 } from "./dispatch-state.js";
@@ -49,6 +52,27 @@ export function createDispatchService(api: OpenClawPluginApi) {
         ctx.logger.warn(`linear-dispatch: hydration failed: ${err}`);
       }
 
+      // Recovery scan: find dispatches stuck in "working" with a workerSessionKey
+      // but no auditSessionKey (worker completed but audit wasn't triggered before crash)
+      try {
+        const state = await readDispatchState(statePath);
+        const recoverable = listRecoverableDispatches(state);
+        for (const d of recoverable) {
+          ctx.logger.warn(
+            `linear-dispatch: recoverable dispatch ${d.issueIdentifier} ` +
+            `(status: ${d.status}, attempt: ${d.attempt}, workerKey: ${d.workerSessionKey}, auditKey: ${d.auditSessionKey ?? "none"})`,
+          );
+          // Mark as stuck for manual review — automated recovery requires
+          // re-triggering audit which needs the full HookContext (Linear API, notifier).
+          // The dispatch monitor logs a warning; operator can re-dispatch.
+        }
+        if (recoverable.length > 0) {
+          ctx.logger.warn(`linear-dispatch: ${recoverable.length} dispatch(es) need recovery — consider re-dispatching`);
+        }
+      } catch (err) {
+        ctx.logger.warn(`linear-dispatch: recovery scan failed: ${err}`);
+      }
+
       ctx.logger.info(`linear-dispatch: service started (interval: ${INTERVAL_MS / 1000}s)`);
 
       intervalId = setInterval(() => runTick(ctx), INTERVAL_MS);
@@ -71,9 +95,14 @@ export function createDispatchService(api: OpenClawPluginApi) {
       // Skip tick if nothing to do
       if (activeCount === 0 && Object.keys(state.dispatches.completed).length === 0) return;
 
-      // 1. Stale dispatch detection
+      // 1. Stale dispatch detection — transition truly stale dispatches to "stuck"
       const stale = listStaleDispatches(state, STALE_THRESHOLD_MS);
       for (const dispatch of stale) {
+        // Skip terminal states
+        if (dispatch.status === "done" || dispatch.status === "failed" || dispatch.status === "stuck") {
+          continue;
+        }
+
         // Check if worktree still exists and has progress
         if (existsSync(dispatch.worktreePath)) {
           const status = getWorktreeStatus(dispatch.worktreePath);
@@ -82,10 +111,29 @@ export function createDispatchService(api: OpenClawPluginApi) {
             continue;
           }
         }
+
         ctx.logger.warn(
           `linear-dispatch: stale dispatch ${dispatch.issueIdentifier} ` +
-          `(dispatched ${dispatch.dispatchedAt}, status: ${dispatch.status})`
+          `(dispatched ${dispatch.dispatchedAt}, status: ${dispatch.status}) — transitioning to stuck`,
         );
+
+        // Try to transition to stuck
+        try {
+          await transitionDispatch(
+            dispatch.issueIdentifier,
+            dispatch.status,
+            "stuck",
+            { stuckReason: `stale_${Math.round((Date.now() - new Date(dispatch.dispatchedAt).getTime()) / 3_600_000)}h` },
+            statePath,
+          );
+          ctx.logger.info(`linear-dispatch: ${dispatch.issueIdentifier} marked as stuck`);
+        } catch (err) {
+          if (err instanceof TransitionError) {
+            ctx.logger.info(`linear-dispatch: CAS failed for stale transition: ${(err as TransitionError).message}`);
+          } else {
+            ctx.logger.error(`linear-dispatch: stale transition error: ${err}`);
+          }
+        }
       }
 
       // 2. Worktree health — verify active dispatches have valid worktrees

@@ -6,9 +6,13 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createInterface } from "node:readline";
 import { exec } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync as readFileSyncFs, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveLinearToken, AUTH_PROFILES_PATH, LINEAR_GRAPHQL_URL } from "./linear-api.js";
 import { LINEAR_OAUTH_AUTH_URL, LINEAR_OAUTH_TOKEN_URL, LINEAR_AGENT_SCOPES } from "./auth.js";
 import { listWorktrees } from "./codex-worktree.js";
+import { loadPrompts, clearPromptCache } from "./pipeline.js";
 
 function prompt(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -238,5 +242,104 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
       }
 
       console.log(`\nTo remove one: openclaw openclaw-linear worktrees --prune <path>\n`);
+    });
+
+  // --- openclaw openclaw-linear prompts ---
+  const prompts = linear
+    .command("prompts")
+    .description("Manage pipeline prompt templates (prompts.yaml)");
+
+  prompts
+    .command("show")
+    .description("Print current prompts.yaml content")
+    .action(async () => {
+      const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+      const customPath = pluginConfig?.promptsPath as string | undefined;
+
+      let resolvedPath: string;
+      if (customPath) {
+        resolvedPath = customPath.startsWith("~")
+          ? customPath.replace("~", process.env.HOME ?? "")
+          : customPath;
+      } else {
+        const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+        resolvedPath = join(pluginRoot, "prompts.yaml");
+      }
+
+      console.log(`\nPrompts file: ${resolvedPath}\n`);
+
+      try {
+        const content = readFileSyncFs(resolvedPath, "utf-8");
+        console.log(content);
+      } catch {
+        console.log("(file not found — using built-in defaults)\n");
+        // Show the loaded defaults
+        clearPromptCache();
+        const loaded = loadPrompts(pluginConfig);
+        console.log(JSON.stringify(loaded, null, 2));
+      }
+    });
+
+  prompts
+    .command("path")
+    .description("Print the resolved prompts.yaml file path")
+    .action(async () => {
+      const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+      const customPath = pluginConfig?.promptsPath as string | undefined;
+
+      let resolvedPath: string;
+      if (customPath) {
+        resolvedPath = customPath.startsWith("~")
+          ? customPath.replace("~", process.env.HOME ?? "")
+          : customPath;
+      } else {
+        const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+        resolvedPath = join(pluginRoot, "prompts.yaml");
+      }
+
+      const exists = existsSync(resolvedPath);
+      console.log(`${resolvedPath} ${exists ? "(exists)" : "(not found — using defaults)"}`);
+    });
+
+  prompts
+    .command("validate")
+    .description("Validate prompts.yaml structure")
+    .action(async () => {
+      const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+      clearPromptCache();
+
+      try {
+        const loaded = loadPrompts(pluginConfig);
+        const errors: string[] = [];
+
+        if (!loaded.worker?.system) errors.push("Missing worker.system");
+        if (!loaded.worker?.task) errors.push("Missing worker.task");
+        if (!loaded.audit?.system) errors.push("Missing audit.system");
+        if (!loaded.audit?.task) errors.push("Missing audit.task");
+        if (!loaded.rework?.addendum) errors.push("Missing rework.addendum");
+
+        // Check for template variables
+        const requiredVars = ["{{identifier}}", "{{title}}", "{{description}}", "{{worktreePath}}"];
+        for (const v of requiredVars) {
+          if (!loaded.worker.task.includes(v)) {
+            errors.push(`worker.task missing template variable: ${v}`);
+          }
+          if (!loaded.audit.task.includes(v)) {
+            errors.push(`audit.task missing template variable: ${v}`);
+          }
+        }
+
+        if (errors.length > 0) {
+          console.log("\nValidation FAILED:\n");
+          for (const e of errors) console.log(`  - ${e}`);
+          console.log();
+          process.exitCode = 1;
+        } else {
+          console.log("\nValidation PASSED — all sections and template variables present.\n");
+        }
+      } catch (err) {
+        console.error(`\nFailed to load prompts: ${err}\n`);
+        process.exitCode = 1;
+      }
     });
 }

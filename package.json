@@ -22,6 +22,7 @@
     "index.ts",
     "src/",
     "openclaw.plugin.json",
+    "prompts.yaml",
     "README.md"
   ],
   "publishConfig": {
@@ -35,5 +36,8 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "dependencies": {
+    "yaml": "^2.8.2"
   }
 }

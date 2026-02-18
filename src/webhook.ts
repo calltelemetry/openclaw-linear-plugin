@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { LinearAgentApi, resolveLinearToken } from "./linear-api.js";
-import { runFullPipeline, type PipelineContext } from "./pipeline.js";
+import { spawnWorker, type HookContext } from "./pipeline.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
 import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch } from "./dispatch-state.js";
+import { createDiscordNotifier, createNoopNotifier, type NotifyFn } from "./notify.js";
 import { assessTier } from "./tier-assess.js";
 import { createWorktree, prepareWorkspace } from "./codex-worktree.js";
 
@@ -1225,6 +1226,7 @@ async function handleDispatch(
     status: "dispatched",
     dispatchedAt: now,
     agentSessionId,
+    attempt: 0,
   }, statePath);
 
   // 8. Register active session for tool resolution
@@ -1274,41 +1276,48 @@ async function handleDispatch(
     api.logger.warn(`@dispatch: could not apply tier label: ${err}`);
   }
 
-  // 11. Run pipeline (non-blocking)
-  const agentId = resolveAgentId(api);
-  const pipelineCtx: PipelineContext = {
-    api,
-    linearApi,
-    agentSessionId: agentSessionId ?? `dispatch-${identifier}-${Date.now()}`,
-    agentId,
-    issue: {
-      id: issue.id,
-      identifier,
-      title: enrichedIssue.title ?? "(untitled)",
-      description: enrichedIssue.description,
-    },
-    worktreePath: worktree.path,
-    codexBranch: worktree.branch,
-    tier: assessment.tier,
-    model: assessment.model,
-  };
-
+  // 11. Run v2 pipeline: worker → audit → verdict (non-blocking)
   activeRuns.add(issue.id);
 
-  // Update status to running
-  await updateDispatchStatus(identifier, "running", statePath);
+  // Instantiate notifier
+  const discordBotToken = (() => {
+    try {
+      const config = JSON.parse(
+        require("node:fs").readFileSync(
+          require("node:path").join(process.env.HOME ?? "/home/claw", ".openclaw", "openclaw.json"),
+          "utf8",
+        ),
+      );
+      return config?.channels?.discord?.token as string | undefined;
+    } catch { return undefined; }
+  })();
+  const flowDiscordChannel = pluginConfig?.flowDiscordChannel as string | undefined;
+  const notify: NotifyFn = (discordBotToken && flowDiscordChannel)
+    ? createDiscordNotifier(discordBotToken, flowDiscordChannel)
+    : createNoopNotifier();
 
-  runFullPipeline(pipelineCtx)
-    .then(async () => {
-      await completeDispatch(identifier, {
-        tier: assessment.tier,
-        status: "done",
-        completedAt: new Date().toISOString(),
-      }, statePath);
-      api.logger.info(`@dispatch: pipeline completed for ${identifier}`);
-    })
+  const hookCtx: HookContext = {
+    api,
+    linearApi,
+    notify,
+    pluginConfig,
+    configPath: statePath,
+  };
+
+  // Re-read dispatch to get fresh state after registration
+  const freshState = await readDispatchState(statePath);
+  const dispatch = getActiveDispatch(freshState, identifier)!;
+
+  await notify("dispatch", {
+    identifier,
+    title: enrichedIssue.title ?? "(untitled)",
+    status: "dispatched",
+  });
+
+  // spawnWorker handles: dispatched→working→auditing→done/rework/stuck
+  spawnWorker(hookCtx, dispatch)
     .catch(async (err) => {
-      api.logger.error(`@dispatch: pipeline failed for ${identifier}: ${err}`);
+      api.logger.error(`@dispatch: pipeline v2 failed for ${identifier}: ${err}`);
       await updateDispatchStatus(identifier, "failed", statePath);
     })
     .finally(() => {

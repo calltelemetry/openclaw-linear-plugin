@@ -133,7 +133,7 @@ function resolveDefaultAgent(api: OpenClawPluginApi): string {
     if (defaultAgent) return defaultAgent[0];
   } catch { /* fall through */ }
 
-  return "zoe";
+  return "default";
 }
 
 function parseAssessment(raw: string): TierAssessment | null {

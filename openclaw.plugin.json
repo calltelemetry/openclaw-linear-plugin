@@ -19,7 +19,10 @@
       "codexTimeoutMs": { "type": "number", "description": "Default Codex timeout in milliseconds", "default": 600000 },
       "enableOrchestration": { "type": "boolean", "description": "Allow agents to spawn sub-agents via spawn_agent/ask_agent tools", "default": true },
       "worktreeBaseDir": { "type": "string", "description": "Base directory for persistent git worktrees (default: ~/.openclaw/worktrees)" },
-      "dispatchStatePath": { "type": "string", "description": "Path to dispatch state JSON file (default: ~/.openclaw/linear-dispatch-state.json)" }
+      "dispatchStatePath": { "type": "string", "description": "Path to dispatch state JSON file (default: ~/.openclaw/linear-dispatch-state.json)" },
+      "flowDiscordChannel": { "type": "string", "description": "Discord channel ID for dispatch lifecycle notifications (omit to disable)" },
+      "promptsPath": { "type": "string", "description": "Override path for prompts.yaml (default: ships with plugin)" },
+      "maxReworkAttempts": { "type": "number", "description": "Max audit failures before escalation", "default": 2 }
     }
   }
 }

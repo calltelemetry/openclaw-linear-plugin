@@ -84,7 +84,7 @@ export async function hydrateFromDispatchState(configPath?: string): Promise<num
   let restored = 0;
 
   for (const [, dispatch] of Object.entries(active)) {
-    if (dispatch.status === "dispatched" || dispatch.status === "running") {
+    if (dispatch.status === "dispatched" || dispatch.status === "working") {
       sessions.set(dispatch.issueId, {
         agentSessionId: dispatch.agentSessionId ?? "",
         issueIdentifier: dispatch.issueIdentifier,

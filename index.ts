@@ -5,8 +5,11 @@ import { registerCli } from "./src/cli.js";
 import { createLinearTools } from "./src/tools.js";
 import { handleLinearWebhook } from "./src/webhook.js";
 import { handleOAuthCallback } from "./src/oauth-callback.js";
-import { resolveLinearToken } from "./src/linear-api.js";
+import { LinearAgentApi, resolveLinearToken } from "./src/linear-api.js";
 import { createDispatchService } from "./src/dispatch-service.js";
+import { readDispatchState, lookupSessionMapping, getActiveDispatch } from "./src/dispatch-state.js";
+import { triggerAudit, processVerdict, type HookContext } from "./src/pipeline.js";
+import { createDiscordNotifier, createNoopNotifier, type NotifyFn } from "./src/notify.js";
 
 export default function register(api: OpenClawPluginApi) {
   const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
@@ -59,6 +62,106 @@ export default function register(api: OpenClawPluginApi) {
 
   // Register dispatch monitor service (stale detection, session hydration, cleanup)
   api.registerService(createDispatchService(api));
+
+  // ---------------------------------------------------------------------------
+  // Dispatch pipeline v2: notifier + agent_end lifecycle hook
+  // ---------------------------------------------------------------------------
+
+  // Instantiate notifier (Discord if configured, otherwise noop)
+  const discordBotToken = (() => {
+    try {
+      const config = JSON.parse(
+        require("node:fs").readFileSync(
+          require("node:path").join(process.env.HOME ?? "/home/claw", ".openclaw", "openclaw.json"),
+          "utf8",
+        ),
+      );
+      return config?.channels?.discord?.token as string | undefined;
+    } catch { return undefined; }
+  })();
+  const flowDiscordChannel = pluginConfig?.flowDiscordChannel as string | undefined;
+
+  const notify: NotifyFn = (discordBotToken && flowDiscordChannel)
+    ? createDiscordNotifier(discordBotToken, flowDiscordChannel)
+    : createNoopNotifier();
+
+  if (flowDiscordChannel && discordBotToken) {
+    api.logger.info(`Linear dispatch: Discord notifications enabled (channel: ${flowDiscordChannel})`);
+  }
+
+  // Register agent_end hook — safety net for sessions_spawn sub-agents.
+  // In the current implementation, the worker→audit→verdict flow runs inline
+  // via spawnWorker() in pipeline.ts. This hook catches sessions_spawn agents
+  // (future upgrade path) and serves as a recovery mechanism.
+  api.on("agent_end", async (event: any, ctx: any) => {
+    try {
+      const sessionKey = ctx?.sessionKey ?? "";
+      if (!sessionKey) return;
+
+      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+      const state = await readDispatchState(statePath);
+      const mapping = lookupSessionMapping(state, sessionKey);
+      if (!mapping) return; // Not a dispatch sub-agent
+
+      const dispatch = getActiveDispatch(state, mapping.dispatchId);
+      if (!dispatch) {
+        api.logger.info(`agent_end: dispatch ${mapping.dispatchId} no longer active`);
+        return;
+      }
+
+      // Stale event rejection — only process if attempt matches
+      if (dispatch.attempt !== mapping.attempt) {
+        api.logger.info(
+          `agent_end: stale event for ${mapping.dispatchId} ` +
+          `(event attempt=${mapping.attempt}, current=${dispatch.attempt})`
+        );
+        return;
+      }
+
+      // Create Linear API for hook context
+      const tokenInfo = resolveLinearToken(pluginConfig);
+      if (!tokenInfo.accessToken) {
+        api.logger.error("agent_end: no Linear access token — cannot process dispatch event");
+        return;
+      }
+      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+        refreshToken: tokenInfo.refreshToken,
+        expiresAt: tokenInfo.expiresAt,
+      });
+
+      const hookCtx: HookContext = {
+        api,
+        linearApi,
+        notify,
+        pluginConfig,
+        configPath: statePath,
+      };
+
+      // Extract output from event
+      const output = typeof event?.output === "string"
+        ? event.output
+        : (event?.messages ?? [])
+            .filter((m: any) => m?.role === "assistant")
+            .map((m: any) => typeof m?.content === "string" ? m.content : "")
+            .join("\n") || "";
+
+      if (mapping.phase === "worker") {
+        api.logger.info(`agent_end: worker completed for ${mapping.dispatchId} — triggering audit`);
+        await triggerAudit(hookCtx, dispatch, {
+          success: event?.success ?? true,
+          output,
+        }, sessionKey);
+      } else if (mapping.phase === "audit") {
+        api.logger.info(`agent_end: audit completed for ${mapping.dispatchId} — processing verdict`);
+        await processVerdict(hookCtx, dispatch, {
+          success: event?.success ?? true,
+          output,
+        }, sessionKey);
+      }
+    } catch (err) {
+      api.logger.error(`agent_end hook error: ${err}`);
+    }
+  });
 
   // Narration Guard: catch short "Let me explore..." responses that narrate intent
   // without actually calling tools, and append a warning for the user.
