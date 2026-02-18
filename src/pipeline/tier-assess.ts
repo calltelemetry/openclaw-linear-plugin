@@ -75,7 +75,7 @@ export async function assessTier(
   const message = `${ASSESS_PROMPT}\n\n${issueText}`;
 
   try {
-    const { runAgent } = await import("./agent.js");
+    const { runAgent } = await import("../agent/agent.js");
     const result = await runAgent({
       api,
       agentId: agentId ?? resolveDefaultAgent(api),

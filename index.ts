@@ -1,15 +1,15 @@
 import { execFileSync } from "node:child_process";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { registerLinearProvider } from "./src/auth.js";
-import { registerCli } from "./src/cli.js";
-import { createLinearTools } from "./src/tools.js";
-import { handleLinearWebhook } from "./src/webhook.js";
-import { handleOAuthCallback } from "./src/oauth-callback.js";
-import { LinearAgentApi, resolveLinearToken } from "./src/linear-api.js";
-import { createDispatchService } from "./src/dispatch-service.js";
-import { readDispatchState, lookupSessionMapping, getActiveDispatch } from "./src/dispatch-state.js";
-import { triggerAudit, processVerdict, type HookContext } from "./src/pipeline.js";
-import { createDiscordNotifier, createNoopNotifier, type NotifyFn } from "./src/notify.js";
+import { registerLinearProvider } from "./src/api/auth.js";
+import { registerCli } from "./src/infra/cli.js";
+import { createLinearTools } from "./src/tools/tools.js";
+import { handleLinearWebhook } from "./src/pipeline/webhook.js";
+import { handleOAuthCallback } from "./src/api/oauth-callback.js";
+import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js";
+import { createDispatchService } from "./src/pipeline/dispatch-service.js";
+import { readDispatchState, lookupSessionMapping, getActiveDispatch } from "./src/pipeline/dispatch-state.js";
+import { triggerAudit, processVerdict, type HookContext } from "./src/pipeline/pipeline.js";
+import { createDiscordNotifier, createNoopNotifier, type NotifyFn } from "./src/infra/notify.js";
 
 export default function register(api: OpenClawPluginApi) {
   const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;

@@ -16,8 +16,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { LinearAgentApi, ActivityContent } from "./linear-api.js";
-import { runAgent } from "./agent.js";
+import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
+import { runAgent } from "../agent/agent.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
 import {
   type Tier,
@@ -33,7 +33,7 @@ import {
   readDispatchState,
   getActiveDispatch,
 } from "./dispatch-state.js";
-import { type NotifyFn } from "./notify.js";
+import { type NotifyFn } from "../infra/notify.js";
 import {
   saveWorkerOutput,
   saveAuditVerdict,
@@ -44,7 +44,7 @@ import {
   writeDispatchMemory,
   resolveOrchestratorWorkspace,
 } from "./artifacts.js";
-import { resolveWatchdogConfig } from "./watchdog.js";
+import { resolveWatchdogConfig } from "../agent/watchdog.js";
 
 // ---------------------------------------------------------------------------
 // Prompt loading
@@ -87,7 +87,7 @@ export function loadPrompts(pluginConfig?: Record<string, unknown>): PromptTempl
       raw = readFileSync(resolved, "utf-8");
     } else {
       // Load from plugin directory (sidecar file)
-      const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+      const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
       raw = readFileSync(join(pluginRoot, "prompts.yaml"), "utf-8");
     }
 

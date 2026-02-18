@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { jsonResult } from "openclaw/plugin-sdk";
-import { getCurrentSession } from "./active-session.js";
+import { getCurrentSession } from "../pipeline/active-session.js";
 import { runCodex } from "./codex-tool.js";
 import { runClaude } from "./claude-tool.js";
 import { runGemini } from "./gemini-tool.js";
@@ -43,7 +43,7 @@ export interface CodingToolsConfig {
 export function loadCodingConfig(): CodingToolsConfig {
   try {
     // Resolve relative to the plugin root (one level up from src/)
-    const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
     const raw = readFileSync(join(pluginRoot, "coding-tools.json"), "utf8");
     return JSON.parse(raw) as CodingToolsConfig;
   } catch {

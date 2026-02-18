@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // Mock all heavy dependencies to isolate pure functions
-vi.mock("./agent.js", () => ({ runAgent: vi.fn() }));
+vi.mock("../agent/agent.js", () => ({ runAgent: vi.fn() }));
 vi.mock("./dispatch-state.js", () => ({
   transitionDispatch: vi.fn(),
   registerSessionMapping: vi.fn(),
@@ -15,7 +15,7 @@ vi.mock("./active-session.js", () => ({
   setActiveSession: vi.fn(),
   clearActiveSession: vi.fn(),
 }));
-vi.mock("./notify.js", () => ({}));
+vi.mock("../infra/notify.js", () => ({}));
 vi.mock("./artifacts.js", () => ({
   saveWorkerOutput: vi.fn(),
   saveAuditVerdict: vi.fn(),
@@ -26,7 +26,7 @@ vi.mock("./artifacts.js", () => ({
   writeDispatchMemory: vi.fn(),
   resolveOrchestratorWorkspace: vi.fn(),
 }));
-vi.mock("./watchdog.js", () => ({
+vi.mock("../agent/watchdog.js", () => ({
   resolveWatchdogConfig: vi.fn(() => ({
     inactivityMs: 120000,
     maxTotalMs: 7200000,

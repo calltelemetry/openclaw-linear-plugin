@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { ActivityContent } from "./linear-api.js";
+import type { ActivityContent } from "../api/linear-api.js";
 import {
   buildLinearApi,
   resolveSession,
@@ -11,7 +11,7 @@ import {
   type CliToolParams,
   type CliResult,
 } from "./cli-shared.js";
-import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
+import { InactivityWatchdog, resolveWatchdogConfig } from "../agent/watchdog.js";
 
 const CLAUDE_BIN = "/home/claw/.npm-global/bin/claude";
 

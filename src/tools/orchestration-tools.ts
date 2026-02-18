@@ -1,6 +1,6 @@
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { jsonResult } from "openclaw/plugin-sdk";
-import { runAgent } from "./agent.js";
+import { runAgent } from "../agent/agent.js";
 
 /**
  * Create orchestration tools that let agents delegate work to other crew agents.

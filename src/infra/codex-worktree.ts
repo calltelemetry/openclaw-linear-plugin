@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync, readdirSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { ensureGitignore } from "./artifacts.js";
+import { ensureGitignore } from "../pipeline/artifacts.js";
 
 const DEFAULT_BASE_REPO = "/home/claw/ai-workspace";
 const DEFAULT_WORKTREE_BASE_DIR = path.join(homedir(), ".openclaw", "worktrees");

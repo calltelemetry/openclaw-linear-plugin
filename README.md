@@ -47,32 +47,33 @@ An OpenClaw plugin that connects Linear to AI agents. Issues get triaged automat
 
 ## How It Works
 
-```
-  You                       Linear                    Plugin                     AI Agents
-   |                          |                         |                           |
-   |  Create issue            |                         |                           |
-   |  ----------------------> |  Webhook (Issue.create)  |                           |
-   |                          |  ----------------------> |  Triage agent             |
-   |                          |                         |  -----------------------> |
-   |                          |                         |  <-- estimate + labels --- |
-   |                          |  <-- update issue ----- |                           |
-   |                          |  <-- post assessment -- |                           |
-   |                          |                         |                           |
-   |  Assign to agent         |                         |                           |
-   |  ----------------------> |  Webhook (Issue.update)  |                           |
-   |                          |  ----------------------> |  Worker agent             |
-   |                          |                         |  -----------------------> |
-   |                          |  <-- streaming status -- |  <-- implements --------- |
-   |                          |                         |  Audit agent (automatic)  |
-   |                          |                         |  -----------------------> |
-   |                          |                         |  <-- JSON verdict -------- |
-   |                          |  <-- result comment --- |                           |
-   |                          |                         |                           |
-   |  Comment "@qa review"    |                         |                           |
-   |  ----------------------> |  Webhook (Comment)       |                           |
-   |                          |  ----------------------> |  QA agent                 |
-   |                          |                         |  -----------------------> |
-   |                          |  <-- branded comment -- |  <-- response ----------- |
+```mermaid
+sequenceDiagram
+    participant You
+    participant Linear
+    participant Plugin
+    participant Agents
+
+    You->>Linear: Create issue
+    Linear->>Plugin: Webhook (Issue.create)
+    Plugin->>Agents: Triage agent
+    Agents-->>Plugin: Estimate + labels
+    Plugin-->>Linear: Update issue
+    Plugin-->>Linear: Post assessment
+
+    You->>Linear: Assign to agent
+    Linear->>Plugin: Webhook (Issue.update)
+    Plugin->>Agents: Worker agent
+    Agents-->>Linear: Streaming status
+    Plugin->>Agents: Audit agent (automatic)
+    Agents-->>Plugin: JSON verdict
+    Plugin-->>Linear: Result comment
+
+    You->>Linear: Comment "@qa review"
+    Linear->>Plugin: Webhook (Comment)
+    Plugin->>Agents: QA agent
+    Agents-->>Plugin: Response
+    Plugin-->>Linear: Branded comment
 ```
 
 ---
@@ -83,37 +84,16 @@ An OpenClaw plugin that connects Linear to AI agents. Issues get triaged automat
 
 When an issue is assigned, the plugin runs a multi-stage pipeline:
 
-```
-  Issue Assigned
-       |
-       v
-  +-----------------+
-  |  DISPATCH       |  Tier assessment (junior/medior/senior),
-  |                 |  worktree creation, state registration
-  +-----------------+
-       |
-       v
-  +-----------------+
-  |  WORKER         |  Plans + implements solution.
-  |  (sub-agent)    |  Posts summary comment.
-  |                 |  CANNOT mark issue as Done.
-  +-----------------+
-       |
-       | (plugin code -- automatic, not LLM-mediated)
-       v
-  +-----------------+
-  |  AUDIT          |  Independent auditor reads issue body
-  |  (sub-agent)    |  (source of truth), verifies criteria,
-  |                 |  runs tests, returns JSON verdict.
-  +-----------------+
-       |
-       v
-  +-----------------+
-  |  VERDICT        |  Plugin code processes the verdict:
-  |  (plugin code)  |  PASS --> done + notify
-  |                 |  FAIL <= max --> rework (attempt++)
-  |                 |  FAIL > max  --> stuck + escalate
-  +-----------------+
+```mermaid
+flowchart TD
+    A[Issue Assigned] --> B["**DISPATCH**<br/>Tier assessment, worktree creation,<br/>state registration"]
+    B --> C["**WORKER** *(sub-agent)*<br/>Plans + implements solution.<br/>Posts summary comment.<br/>CANNOT mark issue as Done."]
+    C -->|"plugin code — automatic,<br/>not LLM-mediated"| D["**AUDIT** *(sub-agent)*<br/>Independent auditor reads issue body,<br/>verifies criteria, runs tests,<br/>returns JSON verdict."]
+    D --> E["**VERDICT** *(plugin code)*"]
+    E -->|PASS| F["Done + notify"]
+    E -->|"FAIL ≤ max"| G["Rework (attempt++)"]
+    G --> C
+    E -->|"FAIL > max"| H["Stuck + escalate"]
 ```
 
 ### Hard-Enforced vs. LLM-Mediated
@@ -129,31 +109,30 @@ When an issue is assigned, the plugin runs a multi-stage pipeline:
 
 ### State Machine
 
-```
-                                  watchdog kill 2x
-                                  +-----------------+
-                                  |                 v
-DISPATCHED --> WORKING --> AUDITING --> DONE       STUCK
-                 ^            |                     ^
-                 |    FAIL ---+  (attempt++)        |
-                 +------------+                     |
-                              |                     |
-               (attempt > max) --------------------+
+```mermaid
+stateDiagram-v2
+    [*] --> DISPATCHED
+    DISPATCHED --> WORKING
+    WORKING --> AUDITING
+    AUDITING --> DONE
+    AUDITING --> WORKING : FAIL (attempt++)
+    WORKING --> STUCK : watchdog kill 2x
+    AUDITING --> STUCK : attempt > max
 ```
 
 All transitions use compare-and-swap (CAS) to prevent races. `dispatch-state.json` is the canonical source of truth.
 
 ### Webhook Event Router
 
-```
-POST /linear/webhook
-  |
-  +-- AgentSessionEvent.created  --> Dispatch pipeline (worker + audit)
-  +-- AgentSessionEvent.prompted --> Resume session (user follow-up)
-  +-- Comment.create             --> Route @mention to role-based agent
-  +-- Issue.create               --> Auto-triage (estimate, labels, priority)
-  +-- Issue.update               --> Dispatch if assigned to agent
-  +-- AppUserNotification        --> Direct agent response
+```mermaid
+flowchart TD
+    A["POST /linear/webhook"] --> B{"Event Type"}
+    B --> C["AgentSessionEvent.created → Dispatch pipeline"]
+    B --> D["AgentSessionEvent.prompted → Resume session"]
+    B --> E["Comment.create → @mention routing"]
+    B --> F["Issue.create → Auto-triage"]
+    B --> G["Issue.update → Dispatch if assigned"]
+    B --> H["AppUserNotification → Direct response"]
 ```
 
 All handlers respond `200 OK` within 5 seconds (Linear requirement), then process asynchronously.
@@ -194,47 +173,37 @@ openclaw-linear/
 |   |-- architecture.md       Internal architecture reference
 |   +-- troubleshooting.md    Diagnostic commands and common issues
 +-- src/
+    |-- pipeline/              Core dispatch lifecycle
+    |   |-- webhook.ts             Event router -- 6 webhook handlers, dispatch logic
+    |   |-- pipeline.ts            v2 pipeline: spawnWorker, triggerAudit, processVerdict
+    |   |-- dispatch-state.ts      File-backed state, CAS transitions, session mapping
+    |   |-- dispatch-service.ts    Background monitor: stale detection, recovery, cleanup
+    |   |-- active-session.ts      In-memory session registry (issueId -> session)
+    |   |-- tier-assess.ts         Issue complexity assessment (junior/medior/senior)
+    |   +-- artifacts.ts           .claw/ directory: manifest, logs, verdicts, summaries
     |
-    |-- Webhook & Pipeline
-    |   |-- webhook.ts            Event router -- 6 webhook handlers, dispatch logic
-    |   |-- pipeline.ts           v2 pipeline: spawnWorker, triggerAudit, processVerdict
-    |   |-- dispatch-state.ts     File-backed state, CAS transitions, session mapping
-    |   |-- dispatch-service.ts   Background monitor: stale detection, recovery, cleanup
-    |   +-- active-session.ts     In-memory session registry (issueId -> session)
+    |-- agent/                 Agent execution & monitoring
+    |   |-- agent.ts               Embedded runner + subprocess fallback, retry on watchdog kill
+    |   +-- watchdog.ts            InactivityWatchdog class + per-agent config resolver
     |
-    |-- Agent Execution
-    |   |-- agent.ts              Embedded runner + subprocess fallback, retry on watchdog kill
-    |   |-- watchdog.ts           InactivityWatchdog class + per-agent config resolver
-    |   +-- tier-assess.ts        Issue complexity assessment (junior/medior/senior)
+    |-- tools/                 Tool registration & CLI backends
+    |   |-- tools.ts               Tool registration (code_run + orchestration)
+    |   |-- code-tool.ts           Unified code_run dispatcher
+    |   |-- cli-shared.ts          Shared helpers (buildLinearApi, resolveSession, defaults)
+    |   |-- claude-tool.ts         Claude Code CLI runner (JSONL -> Linear activities)
+    |   |-- codex-tool.ts          Codex CLI runner (JSONL -> Linear activities)
+    |   |-- gemini-tool.ts         Gemini CLI runner (JSONL -> Linear activities)
+    |   +-- orchestration-tools.ts spawn_agent / ask_agent for multi-agent delegation
     |
-    |-- Coding Tool Backends
-    |   |-- code-tool.ts          Unified code_run dispatcher
-    |   |-- cli-shared.ts         Shared helpers (buildLinearApi, resolveSession, defaults)
-    |   |-- claude-tool.ts        Claude Code CLI runner (JSONL -> Linear activities)
-    |   |-- codex-tool.ts         Codex CLI runner (JSONL -> Linear activities)
-    |   +-- gemini-tool.ts        Gemini CLI runner (JSONL -> Linear activities)
+    |-- api/                   Linear API & auth
+    |   |-- linear-api.ts          GraphQL client, token resolution, auto-refresh
+    |   |-- auth.ts                OAuth provider registration
+    |   +-- oauth-callback.ts      HTTP handler for OAuth redirect
     |
-    |-- Linear API & Auth
-    |   |-- linear-api.ts         GraphQL client, token resolution, auto-refresh
-    |   |-- auth.ts               OAuth provider registration
-    |   +-- oauth-callback.ts     HTTP handler for OAuth redirect
-    |
-    |-- Tools & Orchestration
-    |   |-- tools.ts              Tool registration (code_run + orchestration)
-    |   +-- orchestration-tools.ts  spawn_agent / ask_agent for multi-agent delegation
-    |
-    |-- Artifacts & Notifications
-    |   |-- artifacts.ts          .claw/ directory: manifest, logs, verdicts, summaries
-    |   +-- notify.ts             Discord notifier (+ noop fallback)
-    |
-    |-- Infrastructure
-    |   |-- cli.ts                CLI subcommands (auth, status, worktrees, prompts)
-    |   +-- codex-worktree.ts     Git worktree create/remove/status/PR helpers
-    |
-    +-- Tests
-        |-- webhook.test.ts       Webhook handler tests
-        |-- watchdog.test.ts      Watchdog timer + config resolver tests
-        +-- agent.test.ts         Agent retry wrapper tests
+    +-- infra/                 Infrastructure utilities
+        |-- cli.ts                 CLI subcommands (auth, status, worktrees, prompts)
+        |-- codex-worktree.ts      Git worktree create/remove/status/PR helpers
+        +-- notify.ts              Discord notifier (+ noop fallback)
 ```
 
 ---
@@ -585,23 +554,18 @@ Agent sessions can go silent when LLM providers rate-limit, APIs hang, or CLI to
 
 ### How It Works
 
-```
-  Agent starts
-       |
-       v
-  Watchdog timer starts (inactivitySec countdown)
-       |
-       +-- Every I/O event (JSONL line, stderr, stream callback) --> timer resets
-       |
-       +-- No I/O for inactivitySec --> KILL
-       |       |
-       |       v
-       |   Retry once (automatic)
-       |       |
-       |       +-- Success --> continue pipeline (audit)
-       |       +-- Killed again --> STUCK (escalation)
-       |
-       +-- Total runtime exceeds maxTotalSec --> KILL (no retry)
+```mermaid
+flowchart TD
+    A[Agent starts] --> B["Watchdog timer starts<br/>(inactivitySec countdown)"]
+    B --> C{"I/O event?"}
+    C -->|"JSONL line, stderr,<br/>stream callback"| D[Timer resets]
+    D --> C
+    C -->|"No I/O for inactivitySec"| E[KILL]
+    E --> F[Retry once]
+    F -->|Success| G[Continue pipeline]
+    F -->|Killed again| H["STUCK (escalation)"]
+    B --> I{"Total runtime<br/>> maxTotalSec?"}
+    I -->|Yes| J["KILL (no retry)"]
 ```
 
 ### Three Timeout Dimensions

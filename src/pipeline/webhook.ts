@@ -2,13 +2,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { LinearAgentApi, resolveLinearToken } from "./linear-api.js";
+import { LinearAgentApi, resolveLinearToken } from "../api/linear-api.js";
 import { spawnWorker, type HookContext } from "./pipeline.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
 import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch } from "./dispatch-state.js";
-import { createDiscordNotifier, createNoopNotifier, type NotifyFn } from "./notify.js";
+import { createDiscordNotifier, createNoopNotifier, type NotifyFn } from "../infra/notify.js";
 import { assessTier } from "./tier-assess.js";
-import { createWorktree, prepareWorkspace } from "./codex-worktree.js";
+import { createWorktree, prepareWorkspace } from "../infra/codex-worktree.js";
 import { ensureClawDir, writeManifest } from "./artifacts.js";
 
 // ── Agent profiles (loaded from config, no hardcoded names) ───────
@@ -245,7 +245,7 @@ export async function handleLinearWebhook(
 
         // 3. Run agent with streaming
         const sessionId = `linear-notif-${notification?.type ?? "unknown"}-${Date.now()}`;
-        const { runAgent } = await import("./agent.js");
+        const { runAgent } = await import("../agent/agent.js");
         const result = await runAgent({
           api,
           agentId,
@@ -418,7 +418,7 @@ export async function handleLinearWebhook(
 
         // Run agent with streaming to Linear
         const sessionId = `linear-session-${session.id}`;
-        const { runAgent } = await import("./agent.js");
+        const { runAgent } = await import("../agent/agent.js");
         const result = await runAgent({
           api,
           agentId,
@@ -596,7 +596,7 @@ export async function handleLinearWebhook(
         }).catch(() => {});
 
         const sessionId = `linear-session-${session.id}`;
-        const { runAgent } = await import("./agent.js");
+        const { runAgent } = await import("../agent/agent.js");
         const result = await runAgent({
           api,
           agentId,
@@ -798,7 +798,7 @@ export async function handleLinearWebhook(
 
         // 3. Run agent subprocess with streaming
         const sessionId = `linear-comment-${comment.id ?? Date.now()}`;
-        const { runAgent } = await import("./agent.js");
+        const { runAgent } = await import("../agent/agent.js");
         const result = await runAgent({
           api,
           agentId: mentionedAgent,
@@ -1036,7 +1036,7 @@ export async function handleLinearWebhook(
         ].filter(Boolean).join("\n");
 
         const sessionId = `linear-triage-${issue.id}-${Date.now()}`;
-        const { runAgent } = await import("./agent.js");
+        const { runAgent } = await import("../agent/agent.js");
         const result = await runAgent({
           api,
           agentId,

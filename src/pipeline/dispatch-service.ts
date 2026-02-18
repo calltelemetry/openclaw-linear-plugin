@@ -22,7 +22,7 @@ import {
   removeActiveDispatch,
   pruneCompleted,
 } from "./dispatch-state.js";
-import { getWorktreeStatus } from "./codex-worktree.js";
+import { getWorktreeStatus } from "../infra/codex-worktree.js";
 
 const INTERVAL_MS = 5 * 60_000; // 5 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60_000; // 2 hours

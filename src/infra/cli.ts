@@ -9,10 +9,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { readFileSync as readFileSyncFs, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveLinearToken, AUTH_PROFILES_PATH, LINEAR_GRAPHQL_URL } from "./linear-api.js";
-import { LINEAR_OAUTH_AUTH_URL, LINEAR_OAUTH_TOKEN_URL, LINEAR_AGENT_SCOPES } from "./auth.js";
+import { resolveLinearToken, AUTH_PROFILES_PATH, LINEAR_GRAPHQL_URL } from "../api/linear-api.js";
+import { LINEAR_OAUTH_AUTH_URL, LINEAR_OAUTH_TOKEN_URL, LINEAR_AGENT_SCOPES } from "../api/auth.js";
 import { listWorktrees } from "./codex-worktree.js";
-import { loadPrompts, clearPromptCache } from "./pipeline.js";
+import { loadPrompts, clearPromptCache } from "../pipeline/pipeline.js";
 
 function prompt(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -262,7 +262,7 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
           ? customPath.replace("~", process.env.HOME ?? "")
           : customPath;
       } else {
-        const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+        const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
         resolvedPath = join(pluginRoot, "prompts.yaml");
       }
 
@@ -293,7 +293,7 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
           ? customPath.replace("~", process.env.HOME ?? "")
           : customPath;
       } else {
-        const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+        const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
         resolvedPath = join(pluginRoot, "prompts.yaml");
       }
 

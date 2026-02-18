@@ -6,45 +6,19 @@ Internal reference for developers and maintainers of the Linear agent plugin.
 
 ## System Topology
 
-```
-                        Linear App
-                     (OAuth App Webhook)
-                           |
-                           | HTTPS POST
-                           v
-                  +-------------------+
-                  |   Cloudflare      |
-                  |   Tunnel          |
-                  |   (cloudflared)   |
-                  +--------+----------+
-                           |
-               linear.yourdomain.com
-                           |
-                           v
-                  +-------------------+
-                  |   OpenClaw        |
-                  |   Gateway         |
-                  |   :18789          |
-                  +--------+----------+
-                           |
-            +--------------+--------------+
-            |              |              |
-            v              v              v
-   /linear/webhook   /linear/oauth   /hooks/linear
-   (primary route)   /callback        (back-compat)
-            |
-            v
-   +-------------------+
-   |  Webhook Router   |
-   |  (webhook.ts)     |
-   +--------+----------+
-            |
-  +---------+---------+---------------+---------------+
-  v         v         v               v               v
-AgentSess  Comment  Issue.update    Issue.create    AppUser
-Event      .create  (assign/        (auto-triage)   Notification
-(pipeline) (@mention delegate)
-            routing)
+```mermaid
+flowchart TD
+    L["Linear App<br/>(OAuth App Webhook)"] -->|HTTPS POST| CF["Cloudflare Tunnel<br/>(cloudflared)"]
+    CF -->|"linear.yourdomain.com"| GW["OpenClaw Gateway<br/>:18789"]
+    GW --> R1["/linear/webhook<br/>(primary route)"]
+    GW --> R2["/linear/oauth/callback"]
+    GW --> R3["/hooks/linear<br/>(back-compat)"]
+    R1 --> WR["Webhook Router<br/>(webhook.ts)"]
+    WR --> E1["AgentSessionEvent<br/>(pipeline)"]
+    WR --> E2["Comment.create<br/>(@mention routing)"]
+    WR --> E3["Issue.update<br/>(assign/delegate)"]
+    WR --> E4["Issue.create<br/>(auto-triage)"]
+    WR --> E5["AppUserNotification"]
 ```
 
 ## Webhook Event Types
@@ -71,46 +45,19 @@ All handlers respond `200 OK` within 5 seconds (Linear requirement), then proces
 
 ## Pipeline Stages
 
-```
-Issue Assigned (webhook)
-       |
-       v
-  +-----------+
-  | DISPATCH  |  transitionDispatch(dispatched -> working)
-  |           |  Tier assessment, worktree setup
-  +-----------+
-       |
-       v
-  +-----------+    watchdog                     +-----------+
-  | WORKER    | -- kill 2x ------------------>  |  STUCK    |
-  | (runAgent)|    |                            | (escalate)|
-  +-----------+    | retry once                 +-----------+
-       |           v
-       |    +-----------+
-       |    | WORKER    | (attempt 2)
-       |    | (retry)   |
-       |    +-----------+
-       |           |
-       +-----+-----+
-             |
-             v
-  +-----------+
-  | AUDIT     |  triggerAudit()
-  | (runAgent)|  Independent auditor
-  +-----------+
-       |
-       v
-  +-----------+
-  | VERDICT   |  processVerdict()
-  +-----------+
-       |
-   +---+---+
-   |       |
-   v       v
-  PASS    FAIL
-   |       |
-   v       +-- attempt <= max --> rework (back to WORKER)
-  DONE     +-- attempt > max  --> STUCK (escalation)
+```mermaid
+flowchart TD
+    A["Issue Assigned (webhook)"] --> B["DISPATCH<br/>transitionDispatch(dispatched → working)<br/>Tier assessment, worktree setup"]
+    B --> C["WORKER<br/>(runAgent)"]
+    C -->|"watchdog kill 2x"| S["STUCK<br/>(escalate)"]
+    C -->|"watchdog kill 1x<br/>retry once"| C2["WORKER<br/>(retry, attempt 2)"]
+    C --> D
+    C2 --> D["AUDIT<br/>triggerAudit()<br/>Independent auditor"]
+    D --> E["VERDICT<br/>processVerdict()"]
+    E -->|PASS| F[DONE]
+    E -->|FAIL| G{"attempt ≤ max?"}
+    G -->|Yes| C
+    G -->|No| S
 ```
 
 ### Worker Phase (`spawnWorker`)
@@ -148,22 +95,18 @@ Issue Assigned (webhook)
 
 Uses OpenClaw's `extensionAPI.runEmbeddedPiAgent()` for in-process execution with real-time streaming.
 
-```
-runAgent()
-    |
-    v
-runAgentOnce()
-    |
-    +-- streaming available? --> runEmbedded()
-    |       |
-    |       +-- AbortController + InactivityWatchdog
-    |       +-- onReasoningStream  --> watchdog.tick() + emit thought
-    |       +-- onToolResult       --> watchdog.tick() + emit action
-    |       +-- onAgentEvent       --> watchdog.tick() + emit action
-    |       +-- onPartialReply     --> watchdog.tick()
-    |       +-- watchdog.wasKilled --> { success: false, watchdogKilled: true }
-    |
-    +-- no streaming --> runSubprocess()  (fallback: openclaw agent --json)
+```mermaid
+flowchart TD
+    A[runAgent] --> B[runAgentOnce]
+    B -->|"streaming available?"| C[runEmbedded]
+    C --> D["AbortController + InactivityWatchdog"]
+    D --> E["onReasoningStream → watchdog.tick() + emit thought"]
+    D --> F["onToolResult → watchdog.tick() + emit action"]
+    D --> G["onAgentEvent → watchdog.tick() + emit action"]
+    D --> H["onPartialReply → watchdog.tick()"]
+    D --> I{"watchdog.wasKilled?"}
+    I -->|Yes| J["{ success: false, watchdogKilled: true }"]
+    B -->|"no streaming"| K["runSubprocess<br/>(fallback: openclaw agent --json)"]
 ```
 
 ### Retry Wrapper
@@ -190,14 +133,12 @@ Timer uses dynamic rescheduling: calculates remaining time from last tick, not f
 
 ### Kill Flow
 
-```
-Timer fires
-    |
-    v
-silence = now - lastActivityAt
-    |
-    +-- silence >= threshold --> killed = true, call onKill()
-    +-- silence < threshold  --> reschedule for remaining time
+```mermaid
+flowchart TD
+    A[Timer fires] --> B["silence = now - lastActivityAt"]
+    B --> C{"silence ≥ threshold?"}
+    C -->|Yes| D["killed = true, call onKill()"]
+    C -->|No| E["Reschedule for remaining time"]
 ```
 
 **onKill callback by context:**
@@ -206,14 +147,10 @@ silence = now - lastActivityAt
 
 ### Config Resolution
 
-```
-1. ~/.openclaw/agent-profiles.json  agents.{agentId}.watchdog
-       | not found
-       v
-2. pluginConfig  inactivitySec / maxTotalSec / toolTimeoutSec
-       | not found
-       v
-3. Hardcoded defaults: 120s / 7200s / 600s
+```mermaid
+flowchart TD
+    A["~/.openclaw/agent-profiles.json<br/>agents.{agentId}.watchdog"] -->|not found| B["pluginConfig<br/>inactivitySec / maxTotalSec / toolTimeoutSec"]
+    B -->|not found| C["Hardcoded defaults<br/>120s / 7200s / 600s"]
 ```
 
 All config values are in **seconds**. The resolver converts to ms internally.
@@ -270,12 +207,12 @@ Summaries are also written to the orchestrator's `memory/` directory for long-te
 
 ## @Mention Routing
 
-```
-Linear comment "@qa review this test plan"
-  -> Plugin matches "qa" in mentionAliases
-  -> Looks up agent-profiles.json -> finds "qa" profile
-  -> Dispatches: openclaw agent --agent qa --message "<context>"
-  -> Response posted as branded comment (avatar + label)
+```mermaid
+flowchart LR
+    A["Linear comment<br/>'@qa review this test plan'"] --> B["Plugin matches 'qa'<br/>in mentionAliases"]
+    B --> C["Looks up agent-profiles.json<br/>finds 'qa' profile"]
+    C --> D["Dispatches: openclaw agent<br/>--agent qa --message '...'"]
+    D --> E["Response posted as<br/>branded comment"]
 ```
 
 ---
@@ -284,21 +221,14 @@ Linear comment "@qa review this test plan"
 
 The unified `code_run` tool dispatches to a configured CLI backend:
 
-```
-Agent calls code_run(prompt, ...)
-      |
-      v
-  Resolve backend (explicit > per-agent > global > "claude")
-      |
-      v
-  spawn: {cli} {args} (JSONL streaming)
-      |
-      +-- InactivityWatchdog monitors stdout/stderr
-      +-- JSONL events mapped to Linear activities
-      +-- On close: distinguish inactivity_timeout vs wall-clock timeout
-      |
-      v
-  Return { success, output, error? }
+```mermaid
+flowchart TD
+    A["Agent calls code_run(prompt, ...)"] --> B["Resolve backend<br/>(explicit > per-agent > global > 'claude')"]
+    B --> C["spawn: {cli} {args}<br/>(JSONL streaming)"]
+    C --> D["InactivityWatchdog monitors stdout/stderr"]
+    C --> E["JSONL events mapped to Linear activities"]
+    C --> F["On close: distinguish inactivity_timeout<br/>vs wall-clock timeout"]
+    C --> G["Return { success, output, error? }"]
 ```
 
 Backend-specific error types:
@@ -321,17 +251,11 @@ Both use `runAgent()` under the hood.
 
 ## Token Resolution
 
-```
-1. pluginConfig.accessToken (static)
-       | not found
-       v
-2. ~/.openclaw/auth-profiles.json "linear:default" (OAuth -- preferred)
-       | not found
-       v
-3. LINEAR_ACCESS_TOKEN or LINEAR_API_KEY env var (fallback)
-       | not found
-       v
-4. No token -> warning, webhooks fail gracefully
+```mermaid
+flowchart TD
+    A["pluginConfig.accessToken<br/>(static)"] -->|not found| B["~/.openclaw/auth-profiles.json<br/>'linear:default' (OAuth — preferred)"]
+    B -->|not found| C["LINEAR_ACCESS_TOKEN or<br/>LINEAR_API_KEY env var (fallback)"]
+    C -->|not found| D["No token → warning,<br/>webhooks fail gracefully"]
 ```
 
 OAuth tokens auto-refresh 60s before expiry. On 401, forces refresh and retries once.
@@ -354,29 +278,35 @@ linear/
 |   |-- architecture.md       This file
 |   +-- troubleshooting.md    Diagnostic commands and common issues
 +-- src/
-    |-- webhook.ts             Event router (6 handlers, dedup, dispatch)
-    |-- pipeline.ts            v2 pipeline: spawnWorker, triggerAudit, processVerdict
-    |-- dispatch-state.ts      File-backed state, CAS, session map, idempotency
-    |-- dispatch-service.ts    Background monitor (stale, recovery, prune)
-    |-- active-session.ts      In-memory session registry
-    |-- agent.ts               Embedded runner + subprocess, watchdog + retry
-    |-- watchdog.ts            InactivityWatchdog class + config resolver
-    |-- tier-assess.ts         Complexity assessment (junior/medior/senior)
-    |-- code-tool.ts           Unified code_run dispatcher
-    |-- cli-shared.ts          Shared CLI helpers and defaults
-    |-- claude-tool.ts         Claude Code runner (JSONL + watchdog)
-    |-- codex-tool.ts          Codex runner (JSONL + watchdog)
-    |-- gemini-tool.ts         Gemini runner (JSONL + watchdog)
-    |-- tools.ts               Tool registration (code_run + orchestration)
-    |-- orchestration-tools.ts spawn_agent / ask_agent
-    |-- linear-api.ts          GraphQL client, token resolution, auto-refresh
-    |-- auth.ts                OAuth provider registration
-    |-- oauth-callback.ts      OAuth callback handler
-    |-- cli.ts                 CLI subcommands
-    |-- codex-worktree.ts      Git worktree management
-    |-- artifacts.ts           .claw/ directory artifacts + memory integration
-    |-- notify.ts              Discord notifier (+ noop fallback)
-    |-- webhook.test.ts        Webhook tests
-    |-- watchdog.test.ts       Watchdog timer + config tests
-    +-- agent.test.ts          Agent retry wrapper tests
+    |-- pipeline/              Core dispatch lifecycle
+    |   |-- webhook.ts             Event router (6 handlers, dedup, dispatch)
+    |   |-- pipeline.ts            v2 pipeline: spawnWorker, triggerAudit, processVerdict
+    |   |-- dispatch-state.ts      File-backed state, CAS, session map, idempotency
+    |   |-- dispatch-service.ts    Background monitor (stale, recovery, prune)
+    |   |-- active-session.ts      In-memory session registry
+    |   |-- tier-assess.ts         Complexity assessment (junior/medior/senior)
+    |   +-- artifacts.ts           .claw/ directory artifacts + memory integration
+    |
+    |-- agent/                 Agent execution & monitoring
+    |   |-- agent.ts               Embedded runner + subprocess, watchdog + retry
+    |   +-- watchdog.ts            InactivityWatchdog class + config resolver
+    |
+    |-- tools/                 Tool registration & CLI backends
+    |   |-- tools.ts               Tool registration (code_run + orchestration)
+    |   |-- code-tool.ts           Unified code_run dispatcher
+    |   |-- cli-shared.ts          Shared CLI helpers and defaults
+    |   |-- claude-tool.ts         Claude Code runner (JSONL + watchdog)
+    |   |-- codex-tool.ts          Codex runner (JSONL + watchdog)
+    |   |-- gemini-tool.ts         Gemini runner (JSONL + watchdog)
+    |   +-- orchestration-tools.ts spawn_agent / ask_agent
+    |
+    |-- api/                   Linear API & auth
+    |   |-- linear-api.ts          GraphQL client, token resolution, auto-refresh
+    |   |-- auth.ts                OAuth provider registration
+    |   +-- oauth-callback.ts      OAuth callback handler
+    |
+    +-- infra/                 Infrastructure utilities
+        |-- cli.ts                 CLI subcommands
+        |-- codex-worktree.ts      Git worktree management
+        +-- notify.ts              Discord notifier (+ noop fallback)
 ```

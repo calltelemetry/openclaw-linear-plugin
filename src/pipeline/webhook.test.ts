@@ -17,7 +17,7 @@ vi.mock("./pipeline.js", () => ({
 }));
 
 // Mock the linear-api module
-vi.mock("./linear-api.js", () => ({
+vi.mock("../api/linear-api.js", () => ({
   LinearAgentApi: class MockLinearAgentApi {
     emitActivity = vi.fn().mockResolvedValue(undefined);
     createComment = vi.fn().mockResolvedValue("comment-id");

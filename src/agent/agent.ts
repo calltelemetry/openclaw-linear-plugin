@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { LinearAgentApi, ActivityContent } from "./linear-api.js";
+import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
 
 // ---------------------------------------------------------------------------
