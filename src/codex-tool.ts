@@ -11,6 +11,7 @@ import {
   type CliToolParams,
   type CliResult,
 } from "./cli-shared.js";
+import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
 
 const CODEX_BIN = "/home/claw/.npm-global/bin/codex";
 
@@ -103,7 +104,9 @@ export async function runCodex(
 
   api.logger.info(`codex_run: session=${agentSessionId ?? "none"}, issue=${issueIdentifier ?? "none"}`);
 
-  const timeout = timeoutMs ?? (pluginConfig?.codexTimeoutMs as number) ?? DEFAULT_TIMEOUT_MS;
+  const agentId = (params as any).agentId ?? (pluginConfig?.defaultAgentId as string) ?? "default";
+  const wdConfig = resolveWatchdogConfig(agentId, pluginConfig ?? undefined);
+  const timeout = timeoutMs ?? (pluginConfig?.codexTimeoutMs as number) ?? wdConfig.toolTimeoutMs;
   const workingDir = params.workingDir ?? (pluginConfig?.codexBaseRepo as string) ?? DEFAULT_BASE_REPO;
 
   // Build Linear API for activity streaming
@@ -134,11 +137,26 @@ export async function runCodex(
     });
 
     let killed = false;
+    let killedByWatchdog = false;
     const timer = setTimeout(() => {
       killed = true;
       child.kill("SIGTERM");
       setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 5_000);
     }, timeout);
+
+    const watchdog = new InactivityWatchdog({
+      inactivityMs: wdConfig.inactivityMs,
+      label: `codex:${agentSessionId ?? "unknown"}`,
+      logger: api.logger,
+      onKill: () => {
+        killedByWatchdog = true;
+        killed = true;
+        clearTimeout(timer);
+        child.kill("SIGTERM");
+        setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 5_000);
+      },
+    });
+    watchdog.start();
 
     const collectedMessages: string[] = [];
     const collectedCommands: string[] = [];
@@ -147,6 +165,7 @@ export async function runCodex(
     const rl = createInterface({ input: child.stdout! });
     rl.on("line", (line) => {
       if (!line.trim()) return;
+      watchdog.tick();
 
       let event: any;
       try {
@@ -189,11 +208,13 @@ export async function runCodex(
     });
 
     child.stderr?.on("data", (chunk) => {
+      watchdog.tick();
       stderrOutput += chunk.toString();
     });
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      watchdog.stop();
       rl.close();
 
       const parts: string[] = [];
@@ -202,11 +223,15 @@ export async function runCodex(
       const output = parts.join("\n\n") || stderrOutput || "(no output)";
 
       if (killed) {
-        api.logger.warn(`Codex timed out after ${timeout}ms`);
+        const errorType = killedByWatchdog ? "inactivity_timeout" : "timeout";
+        const reason = killedByWatchdog
+          ? `Codex killed by inactivity watchdog (no I/O for ${Math.round(wdConfig.inactivityMs / 1000)}s)`
+          : `Codex timed out after ${Math.round(timeout / 1000)}s`;
+        api.logger.warn(reason);
         resolve({
           success: false,
-          output: `Codex timed out after ${Math.round(timeout / 1000)}s. Partial output:\n${output}`,
-          error: "timeout",
+          output: `${reason}. Partial output:\n${output}`,
+          error: errorType,
         });
         return;
       }
@@ -227,6 +252,7 @@ export async function runCodex(
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      watchdog.stop();
       rl.close();
       api.logger.error(`Codex spawn error: ${err}`);
       resolve({

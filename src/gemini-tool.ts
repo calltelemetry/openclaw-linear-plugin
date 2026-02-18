@@ -11,6 +11,7 @@ import {
   type CliToolParams,
   type CliResult,
 } from "./cli-shared.js";
+import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
 
 const GEMINI_BIN = "/home/claw/.npm-global/bin/gemini";
 
@@ -98,7 +99,9 @@ export async function runGemini(
 
   api.logger.info(`gemini_run: session=${agentSessionId ?? "none"}, issue=${issueIdentifier ?? "none"}`);
 
-  const timeout = timeoutMs ?? (pluginConfig?.geminiTimeoutMs as number) ?? DEFAULT_TIMEOUT_MS;
+  const agentId = (params as any).agentId ?? (pluginConfig?.defaultAgentId as string) ?? "default";
+  const wdConfig = resolveWatchdogConfig(agentId, pluginConfig ?? undefined);
+  const timeout = timeoutMs ?? (pluginConfig?.geminiTimeoutMs as number) ?? wdConfig.toolTimeoutMs;
   const workingDir = params.workingDir ?? (pluginConfig?.geminiBaseRepo as string) ?? DEFAULT_BASE_REPO;
 
   const linearApi = buildLinearApi(api, agentSessionId);
@@ -131,11 +134,26 @@ export async function runGemini(
     });
 
     let killed = false;
+    let killedByWatchdog = false;
     const timer = setTimeout(() => {
       killed = true;
       child.kill("SIGTERM");
       setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 5_000);
     }, timeout);
+
+    const watchdog = new InactivityWatchdog({
+      inactivityMs: wdConfig.inactivityMs,
+      label: `gemini:${agentSessionId ?? "unknown"}`,
+      logger: api.logger,
+      onKill: () => {
+        killedByWatchdog = true;
+        killed = true;
+        clearTimeout(timer);
+        child.kill("SIGTERM");
+        setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 5_000);
+      },
+    });
+    watchdog.start();
 
     const collectedMessages: string[] = [];
     const collectedCommands: string[] = [];
@@ -144,6 +162,7 @@ export async function runGemini(
     const rl = createInterface({ input: child.stdout! });
     rl.on("line", (line) => {
       if (!line.trim()) return;
+      watchdog.tick();
 
       let event: any;
       try {
@@ -187,11 +206,13 @@ export async function runGemini(
     });
 
     child.stderr?.on("data", (chunk) => {
+      watchdog.tick();
       stderrOutput += chunk.toString();
     });
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      watchdog.stop();
       rl.close();
 
       const parts: string[] = [];
@@ -200,11 +221,15 @@ export async function runGemini(
       const output = parts.join("\n\n") || stderrOutput || "(no output)";
 
       if (killed) {
-        api.logger.warn(`Gemini timed out after ${timeout}ms`);
+        const errorType = killedByWatchdog ? "inactivity_timeout" : "timeout";
+        const reason = killedByWatchdog
+          ? `Gemini killed by inactivity watchdog (no I/O for ${Math.round(wdConfig.inactivityMs / 1000)}s)`
+          : `Gemini timed out after ${Math.round(timeout / 1000)}s`;
+        api.logger.warn(reason);
         resolve({
           success: false,
-          output: `Gemini timed out after ${Math.round(timeout / 1000)}s. Partial output:\n${output}`,
-          error: "timeout",
+          output: `${reason}. Partial output:\n${output}`,
+          error: errorType,
         });
         return;
       }
@@ -225,6 +250,7 @@ export async function runGemini(
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      watchdog.stop();
       rl.close();
       api.logger.error(`Gemini spawn error: ${err}`);
       resolve({

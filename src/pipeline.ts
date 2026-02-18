@@ -44,6 +44,7 @@ import {
   writeDispatchMemory,
   resolveOrchestratorWorkspace,
 } from "./artifacts.js";
+import { resolveWatchdogConfig } from "./watchdog.js";
 
 // ---------------------------------------------------------------------------
 // Prompt loading
@@ -326,7 +327,9 @@ export async function triggerAudit(
     agentId: (pluginConfig?.defaultAgentId as string) ?? "default",
     sessionId: auditSessionId,
     message: `${auditPrompt.system}\n\n${auditPrompt.task}`,
-    timeoutMs: 5 * 60_000,
+    streaming: dispatch.agentSessionId
+      ? { linearApi, agentSessionId: dispatch.agentSessionId }
+      : undefined,
   });
 
   // runAgent returns inline (embedded runner) — process verdict directly.
@@ -670,21 +673,72 @@ export async function spawnWorker(
     agentId: (pluginConfig?.defaultAgentId as string) ?? "default",
     sessionId: workerSessionId,
     message: `${workerPrompt.system}\n\n${workerPrompt.task}`,
-    timeoutMs: (pluginConfig?.codexTimeoutMs as number) ?? 10 * 60_000,
+    streaming: dispatch.agentSessionId
+      ? { linearApi, agentSessionId: dispatch.agentSessionId }
+      : undefined,
   });
 
   // Save worker output to .claw/
   const workerElapsed = Date.now() - workerStartTime;
+  const agentId = (pluginConfig?.defaultAgentId as string) ?? "default";
   try { saveWorkerOutput(dispatch.worktreePath, dispatch.attempt, result.output); } catch {}
   try {
     appendLog(dispatch.worktreePath, {
       ts: new Date().toISOString(), phase: "worker", attempt: dispatch.attempt,
-      agent: (pluginConfig?.defaultAgentId as string) ?? "default",
+      agent: agentId,
       prompt: workerPrompt.task.slice(0, 200),
       outputPreview: result.output.slice(0, 500),
       success: result.success, durationMs: workerElapsed,
     });
   } catch {}
+
+  // Handle watchdog kill (runAgent already retried once — both attempts failed)
+  if (result.watchdogKilled) {
+    const wdConfig = resolveWatchdogConfig(agentId, pluginConfig ?? undefined);
+    const thresholdSec = Math.round(wdConfig.inactivityMs / 1000);
+
+    api.logger.warn(`${TAG} worker killed by inactivity watchdog 2x — escalating to stuck`);
+
+    try {
+      appendLog(dispatch.worktreePath, {
+        ts: new Date().toISOString(), phase: "watchdog", attempt: dispatch.attempt,
+        agent: agentId, prompt: "(watchdog kill)",
+        outputPreview: result.output.slice(0, 500), success: false,
+        durationMs: workerElapsed,
+        watchdog: { reason: "inactivity", silenceSec: thresholdSec, thresholdSec, retried: true },
+      });
+    } catch {}
+
+    try { updateManifest(dispatch.worktreePath, { status: "stuck", attempts: dispatch.attempt + 1 }); } catch {}
+
+    try {
+      await transitionDispatch(
+        dispatch.issueIdentifier, "working", "stuck",
+        { stuckReason: "watchdog_kill_2x" }, configPath,
+      );
+    } catch (err) {
+      if (err instanceof TransitionError) {
+        api.logger.warn(`${TAG} CAS failed for watchdog stuck transition: ${err.message}`);
+      }
+    }
+
+    await linearApi.createComment(
+      dispatch.issueId,
+      `## Watchdog Kill\n\nAgent killed by inactivity watchdog (no I/O for ${thresholdSec}s). ` +
+      `Automatic retry also failed.\n\n---\n*Needs human review. Artifacts: \`${dispatch.worktreePath}/.claw/\`*`,
+    ).catch(() => {});
+
+    await hookCtx.notify("watchdog_kill", {
+      identifier: dispatch.issueIdentifier,
+      title: issue.title,
+      status: "stuck",
+      attempt: dispatch.attempt,
+      reason: `no I/O for ${thresholdSec}s`,
+    });
+
+    clearActiveSession(dispatch.issueId);
+    return;
+  }
 
   // runAgent returns inline — trigger audit directly.
   // Re-read dispatch state since it may have changed during worker run.

@@ -2,39 +2,48 @@
 
 Operational reference for diagnosing issues with the Linear agent plugin.
 
+---
+
+## Quick Health Check
+
+```bash
+systemctl --user status openclaw-gateway        # Gateway running?
+openclaw openclaw-linear status                  # Token valid?
+openclaw doctor                                  # Config valid?
+journalctl --user -u openclaw-gateway -f         # Live logs
+linearis issues list -l 1                        # linearis auth working?
+openclaw openclaw-linear prompts validate        # Prompts valid?
+```
+
+---
+
 ## Service Status
 
 ```bash
-# Check gateway service status
+# Gateway service
 systemctl --user status openclaw-gateway
-
-# View gateway logs (live tail)
-journalctl --user -u openclaw-gateway -f
-
-# View recent gateway logs
-journalctl --user -u openclaw-gateway --since "10 min ago" --no-pager
-
-# Restart the gateway
 systemctl --user restart openclaw-gateway
 
-# Check what the service is configured with
+# View logs (live tail)
+journalctl --user -u openclaw-gateway -f
+
+# View recent logs
+journalctl --user -u openclaw-gateway --since "10 min ago" --no-pager
+
+# Filter for errors only
+journalctl --user -u openclaw-gateway --since "1 hour ago" | grep -iE 'error|fail|crash|panic'
+
+# Check service config
 systemctl --user show openclaw-gateway | grep -E 'Environment|ExecStart|Active'
 ```
 
-## Token & Auth Debugging
+---
+
+## Token & Auth
 
 ```bash
-# Check current token status via CLI
+# Check token status
 openclaw openclaw-linear status
-
-# Verify token is loaded (look for "token: profile|env|config|missing")
-journalctl --user -u openclaw-gateway --since "1 min ago" | grep -i "token"
-
-# Test Linear API connection directly
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer {OAUTH_TOKEN}" \
-  -d '{"query":"{ viewer { id name email } }"}' | jq .
 
 # Check which token profiles exist
 cat ~/.openclaw/auth-profiles.json | jq '.profiles | keys'
@@ -44,17 +53,36 @@ cat ~/.openclaw/auth-profiles.json | \
   jq -r '.profiles["linear:default"].expiresAt' | \
   xargs -I{} date -d @$(echo "{} / 1000" | bc)
 
-# Check OAuth scopes
-cat ~/.openclaw/auth-profiles.json | jq '.profiles["linear:default"].scope'
+# Test Linear API directly
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {OAUTH_TOKEN}" \
+  -d '{"query":"{ viewer { id name email } }"}' | jq .
+
+# Re-authorize if tokens are stale
+openclaw openclaw-linear auth
+systemctl --user restart openclaw-gateway
 ```
+
+---
 
 ## Webhook Testing
 
 ```bash
-# Test webhook endpoint locally (simulate Comment.create with @mention)
+# Ping test (should return "ok")
 curl -s -X POST http://localhost:18789/linear/webhook \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer {GATEWAY_TOKEN}" \
+  -d '{"type":"test","action":"ping"}'
+
+# Test through tunnel
+curl -s -X POST https://your-domain.com/linear/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"type":"test","action":"ping"}' \
+  -w "\nHTTP %{http_code}\n"
+
+# Simulate Comment.create with @mention
+curl -s -X POST http://localhost:18789/linear/webhook \
+  -H "Content-Type: application/json" \
   -d '{
     "type": "Comment",
     "action": "create",
@@ -64,18 +92,11 @@ curl -s -X POST http://localhost:18789/linear/webhook \
       "user": { "name": "Tester" },
       "issue": { "id": "test-issue-id", "identifier": "UAT-999", "title": "Test Issue" }
     }
-  }' && echo
-
-# Test webhook through the tunnel
-curl -s -X POST https://your-domain.com/linear/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"type":"test","action":"ping"}' \
-  -w "\nHTTP %{http_code}\n"
+  }'
 
 # Simulate AgentSessionEvent.created
 curl -s -X POST http://localhost:18789/linear/webhook \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer {GATEWAY_TOKEN}" \
   -d '{
     "type": "AgentSessionEvent",
     "action": "created",
@@ -83,108 +104,171 @@ curl -s -X POST http://localhost:18789/linear/webhook \
       "id": "test-session-id",
       "issue": { "id": "test-issue", "identifier": "UAT-100", "title": "Test" }
     }
-  }' && echo
+  }'
 
 # Watch webhook arrivals in logs
 journalctl --user -u openclaw-gateway -f | grep -i "webhook\|Linear"
 ```
 
+---
+
+## Watchdog & Timeouts
+
+```bash
+# Check if watchdog is firing
+journalctl --user -u openclaw-gateway --since "30 min ago" | grep -i "watchdog"
+
+# Look for specific watchdog kills
+journalctl --user -u openclaw-gateway --since "1 hour ago" | grep "Watchdog KILL"
+
+# Check watchdog config for a specific agent
+cat ~/.openclaw/agent-profiles.json | jq '.agents.zoe.watchdog'
+
+# Check .claw/ artifact logs for watchdog events
+cat /path/to/worktree/.claw/log.jsonl | jq 'select(.phase == "watchdog")'
+
+# Check all .claw/ logs for a dispatch
+cat /path/to/worktree/.claw/log.jsonl | jq .
+
+# Check dispatch manifest
+cat /path/to/worktree/.claw/manifest.json | jq .
+```
+
+### Watchdog Tuning
+
+If agents are being killed too aggressively, increase `inactivitySec` in the agent profile:
+
+```json
+{
+  "agents": {
+    "coder": {
+      "watchdog": {
+        "inactivitySec": 300,
+        "maxTotalSec": 7200,
+        "toolTimeoutSec": 900
+      }
+    }
+  }
+}
+```
+
+If agents are hanging too long before being killed, decrease it. Restart the gateway after changing profiles.
+
+---
+
 ## Tunnel & Proxy
 
 ```bash
-# Check Cloudflare tunnel status
+# Cloudflare tunnel status
 systemctl status cloudflared
 
-# View tunnel config
+# Tunnel config
 cat /etc/cloudflared/config.yml 2>/dev/null || cat ~/.cloudflared/config.yml
 
-# Check listening ports (gateway on 18789, proxy on 18790)
+# Check listening ports
 ss -tlnp | grep -E '1878[09]'
-
-# Check proxy process
-ps aux | grep linear-proxy
-
-# Test proxy connectivity (POST)
-curl -s -o /dev/null -w "HTTP %{http_code}\n" \
-  http://localhost:18790/linear/webhook \
-  -X POST -H "Content-Type: application/json" -d '{}'
-
-# Test gateway directly (bypassing proxy)
-curl -s -o /dev/null -w "HTTP %{http_code}\n" \
-  http://localhost:18789/linear/webhook \
-  -X POST -H "Content-Type: application/json" \
-  -H "Authorization: Bearer {GATEWAY_TOKEN}" -d '{}'
 
 # Verify DNS resolves to tunnel
 dig +short your-subdomain.yourdomain.com CNAME
+
+# Test gateway directly (bypassing tunnel)
+curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+  http://localhost:18789/linear/webhook \
+  -X POST -H "Content-Type: application/json" -d '{}'
 ```
+
+---
 
 ## Agent Profiles
 
 ```bash
-# View configured agent profiles
+# List configured agents
 cat ~/.openclaw/agent-profiles.json | jq '.agents | keys'
 
-# Check which agent is default
+# Find the default agent
 cat ~/.openclaw/agent-profiles.json | jq '.agents | to_entries[] | select(.value.isDefault) | .key'
 
 # List all mention aliases
 cat ~/.openclaw/agent-profiles.json | \
   jq '[.agents | to_entries[] | {agent: .key, aliases: .value.mentionAliases}]'
 
-# List all app aliases (default agent only)
+# List all watchdog configs
 cat ~/.openclaw/agent-profiles.json | \
-  jq '[.agents | to_entries[] | select(.value.appAliases) | {agent: .key, appAliases: .value.appAliases}]'
+  jq '[.agents | to_entries[] | {agent: .key, watchdog: .value.watchdog}]'
 ```
 
-## OpenClaw Config Validation
+---
+
+## Dispatch State
 
 ```bash
-# Validate config (catches unrecognized keys that cause crashes)
+# View active dispatches
+cat ~/.openclaw/linear-dispatch-state.json | jq '.dispatches.active'
+
+# View completed dispatches
+cat ~/.openclaw/linear-dispatch-state.json | jq '.dispatches.completed'
+
+# View session mappings
+cat ~/.openclaw/linear-dispatch-state.json | jq '.sessionMap'
+
+# Count processed events
+cat ~/.openclaw/linear-dispatch-state.json | jq '.processedEvents | length'
+```
+
+---
+
+## Config Validation
+
+```bash
+# Validate gateway config (catches unrecognized keys that cause crashes)
 openclaw doctor --fix
 
-# Check plugin load paths
+# Check plugin entries
 cat ~/.openclaw/openclaw.json | jq '.plugins'
 
-# Check systemd service environment vars
-systemctl --user show openclaw-gateway | grep Environment
-
-# Check what agents are defined
+# Check agent definitions
 cat ~/.openclaw/openclaw.json | jq '.agents | keys'
+
+# Check systemd environment
+systemctl --user show openclaw-gateway | grep Environment
 ```
+
+---
 
 ## Process & Port Inspection
 
 ```bash
-# Show all OpenClaw-related processes
-ps aux | grep -E 'openclaw|cloudflared|linear-proxy'
+# Show all related processes
+ps aux | grep -E 'openclaw|cloudflared'
 
 # Check for port conflicts
 ss -tlnp | grep -E '1878[09]'
 
-# Check for TIME_WAIT sockets (prevents restart)
+# Check for TIME_WAIT sockets (can prevent restart)
 ss -tan | grep -E '1878[09]' | grep TIME-WAIT
 
-# Gateway systemd service logs (last 50 lines)
+# Last 50 lines of gateway logs
 journalctl --user -u openclaw-gateway -n 50 --no-pager
-
-# Filter logs for errors only
-journalctl --user -u openclaw-gateway --since "1 hour ago" | grep -iE 'error|fail|crash|panic'
 ```
+
+---
 
 ## Common Issues
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `token: missing` in logs | No token in env or auth profile store | Run `openclaw openclaw-linear auth` or set `LINEAR_API_KEY` in systemd service env |
-| `Unrecognized key` crash | Added custom keys to `plugins.entries` in `openclaw.json` | Remove the key — use env vars or auth profile store instead. Plugin entries only accept `enabled`. |
+| Agent goes silent, eventually killed | LLM provider timeout or rate limit | Watchdog handles this automatically. Check `inactivitySec` config if kill is too fast/slow. |
+| Dispatch stuck after watchdog kill | Both retry attempts failed | Check `.claw/log.jsonl` for watchdog entries. Re-assign issue to restart. |
+| `token: missing` in logs | No token in env or auth profile | Run `openclaw openclaw-linear auth` or set `LINEAR_API_KEY` |
+| `Unrecognized key` crash | Custom keys in `plugins.entries` | Remove the key -- use env vars or auth profile store. Plugin entries only accept `enabled`. |
 | Webhook returns 405 | GET request to webhook endpoint | Webhooks must be POST |
-| 502 through tunnel | Proxy or gateway not running | Check `ss -tlnp \| grep 1878`, restart proxy/gateway |
-| Agent not responding to @mentions | `mentionAliases` not in agent profiles | Add aliases to `~/.openclaw/agent-profiles.json` |
-| Duplicate responses | Both webhooks firing for same event | Dedup window handles this; check webhook event subscriptions aren't overlapping |
-| `AgentSession.created missing session` | Payload structure mismatch | Check logs — Linear uses `AgentSessionEvent`/`created`, NOT `AgentSession`/`create` |
-| OAuth 401 errors | Token expired and refresh failed | Re-run `openclaw openclaw-linear auth` |
-| `No defaultAgentId` error | No agent marked `isDefault` and no `defaultAgentId` in config | Mark one agent `"isDefault": true` in agent-profiles.json |
-| Agent timeout | Agent subprocess exceeded time limit | Defaults: 3 min for mentions, 5/10/5 min for pipeline stages |
-| OAuth callback 501/502 | Proxy doesn't support GET, or tunnel routing issue | Exchange code manually via curl (see README manual OAuth section) |
-| Port "Address already in use" on restart | TIME_WAIT sockets holding the port | Wait 60s, or check with `ss -tan \| grep TIME-WAIT` |
+| 502 through tunnel | Gateway not running | Check `ss -tlnp \| grep 1878`, restart gateway |
+| Agent not responding to @mentions | Missing `mentionAliases` | Add aliases to `~/.openclaw/agent-profiles.json` |
+| Duplicate responses | Both webhooks firing for same event | Dedup handles this; check webhook event subscriptions aren't overlapping |
+| `AgentSession.created missing session` | Payload structure mismatch | Linear uses `AgentSessionEvent`/`created`, NOT `AgentSession`/`create` |
+| OAuth 401 errors | Token expired, refresh failed | Re-run `openclaw openclaw-linear auth` |
+| `No defaultAgentId` error | No agent marked `isDefault` | Set `"isDefault": true` on one agent in agent-profiles.json |
+| Agent timeout (wall-clock) | Session exceeded `maxTotalSec` | Increase `maxTotalSec` in agent profile or plugin config |
+| `code_run` killed by watchdog | CLI hung with no output | Check CLI binary availability. Increase `toolTimeoutSec` if legitimate slow operations. |
+| OAuth callback 501/502 | Tunnel routing issue | Verify tunnel config routes to gateway port |
+| Port "Address already in use" | TIME_WAIT sockets | Wait 60s, or check with `ss -tan \| grep TIME-WAIT` |

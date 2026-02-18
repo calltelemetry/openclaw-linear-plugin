@@ -17,7 +17,8 @@ export type NotifyKind =
   | "audit_pass"     // audit passed → done
   | "audit_fail"     // audit failed → rework
   | "escalation"     // 2x fail or stale → stuck
-  | "stuck";         // stale detection
+  | "stuck"          // stale detection
+  | "watchdog_kill"; // agent killed by inactivity watchdog
 
 export interface NotifyPayload {
   identifier: string;
@@ -55,6 +56,10 @@ function formatDiscordMessage(kind: NotifyKind, payload: NotifyPayload): string 
       return `🚨 ${prefix} needs human review — ${payload.reason ?? "audit failed 2x"}`;
     case "stuck":
       return `⏰ ${prefix} stuck — ${payload.reason ?? "stale 2h"}`;
+    case "watchdog_kill":
+      return `⚡ ${prefix} killed by watchdog (${payload.reason ?? "no I/O for 120s"}). ${
+        payload.attempt != null ? `Retrying (attempt ${payload.attempt}).` : "Will retry."
+      }`;
     default:
       return `${prefix} — ${kind}: ${payload.status}`;
   }

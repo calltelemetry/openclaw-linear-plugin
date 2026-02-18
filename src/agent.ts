@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { LinearAgentApi, ActivityContent } from "./linear-api.js";
+import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
 
 // ---------------------------------------------------------------------------
 // Agent directory resolution (config-based, not ext API which ignores agentId)
@@ -46,6 +47,7 @@ async function getExtensionAPI() {
 export interface AgentRunResult {
   success: boolean;
   output: string;
+  watchdogKilled?: boolean;
 }
 
 export interface AgentStreamCallbacks {
@@ -54,8 +56,10 @@ export interface AgentStreamCallbacks {
 }
 
 /**
- * Run an agent using the embedded runner with streaming callbacks.
- * Falls back to subprocess if the embedded runner is unavailable.
+ * Run an agent with automatic retry on watchdog kill.
+ *
+ * Tries embedded runner first (if streaming callbacks provided), falls back
+ * to subprocess. If the inactivity watchdog kills the run, retries once.
  */
 export async function runAgent(params: {
   api: OpenClawPluginApi;
@@ -65,14 +69,54 @@ export async function runAgent(params: {
   timeoutMs?: number;
   streaming?: AgentStreamCallbacks;
 }): Promise<AgentRunResult> {
-  const { api, agentId, sessionId, message, timeoutMs = 5 * 60_000, streaming } = params;
+  const maxAttempts = 2;
 
-  api.logger.info(`Dispatching agent ${agentId} for session ${sessionId}`);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const result = await runAgentOnce(params);
+
+    if (result.success || !result.watchdogKilled || attempt === maxAttempts - 1) {
+      return result;
+    }
+
+    params.api.logger.warn(
+      `Agent ${params.agentId} killed by watchdog, retrying (attempt ${attempt + 1}/${maxAttempts})`,
+    );
+
+    // Emit Linear activity about the retry if streaming
+    if (params.streaming) {
+      params.streaming.linearApi.emitActivity(params.streaming.agentSessionId, {
+        type: "error",
+        body: `Agent killed by inactivity watchdog — no I/O for the configured threshold. Retrying...`,
+      }).catch(() => {});
+    }
+  }
+
+  // Unreachable, but TypeScript needs it
+  return { success: false, output: "Watchdog retry exhausted" };
+}
+
+/**
+ * Single attempt to run an agent (no retry logic).
+ */
+async function runAgentOnce(params: {
+  api: OpenClawPluginApi;
+  agentId: string;
+  sessionId: string;
+  message: string;
+  timeoutMs?: number;
+  streaming?: AgentStreamCallbacks;
+}): Promise<AgentRunResult> {
+  const { api, agentId, sessionId, message, streaming } = params;
+  const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+  const wdConfig = resolveWatchdogConfig(agentId, pluginConfig);
+  const timeoutMs = params.timeoutMs ?? wdConfig.maxTotalMs;
+
+  api.logger.info(`Dispatching agent ${agentId} for session ${sessionId} (timeout=${Math.round(timeoutMs / 1000)}s, inactivity=${Math.round(wdConfig.inactivityMs / 1000)}s)`);
 
   // Try embedded runner first (has streaming callbacks)
   if (streaming) {
     try {
-      return await runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming);
+      return await runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming, wdConfig.inactivityMs);
     } catch (err) {
       api.logger.warn(`Embedded runner failed, falling back to subprocess: ${err}`);
     }
@@ -83,7 +127,7 @@ export async function runAgent(params: {
 }
 
 /**
- * Embedded agent runner with real-time streaming to Linear.
+ * Embedded agent runner with real-time streaming to Linear and inactivity watchdog.
  */
 async function runEmbedded(
   api: OpenClawPluginApi,
@@ -92,6 +136,7 @@ async function runEmbedded(
   message: string,
   timeoutMs: number,
   streaming: AgentStreamCallbacks,
+  inactivityMs: number,
 ): Promise<AgentRunResult> {
   const ext = await getExtensionAPI();
 
@@ -131,8 +176,22 @@ async function runEmbedded(
     });
   };
 
+  // --- Inactivity watchdog ---
+  const controller = new AbortController();
+  const watchdog = new InactivityWatchdog({
+    inactivityMs,
+    label: `embedded:${agentId}:${sessionId}`,
+    logger: api.logger,
+    onKill: () => {
+      controller.abort();
+      try { ext.abortEmbeddedPiRun(sessionId); } catch {}
+    },
+  });
+
   // Track last emitted tool to avoid duplicates
   let lastToolAction = "";
+
+  watchdog.start();
 
   const result = await ext.runEmbeddedPiAgent({
     sessionId,
@@ -146,11 +205,13 @@ async function runEmbedded(
     config,
     provider,
     model,
+    abortSignal: controller.signal,
     shouldEmitToolResult: () => true,
     shouldEmitToolOutput: () => true,
 
     // Stream reasoning/thinking to Linear
     onReasoningStream: (payload) => {
+      watchdog.tick();
       const text = payload.text?.trim();
       if (text && text.length > 10) {
         emit({ type: "thought", body: text.slice(0, 500) });
@@ -159,6 +220,7 @@ async function runEmbedded(
 
     // Stream tool results to Linear
     onToolResult: (payload) => {
+      watchdog.tick();
       const text = payload.text?.trim();
       if (text) {
         // Truncate tool results for activity display
@@ -169,6 +231,7 @@ async function runEmbedded(
 
     // Raw agent events — capture tool starts/ends
     onAgentEvent: (evt) => {
+      watchdog.tick();
       const { stream, data } = evt;
 
       if (stream !== "tool") return;
@@ -191,10 +254,13 @@ async function runEmbedded(
 
     // Partial assistant text (for long responses)
     onPartialReply: (payload) => {
+      watchdog.tick();
       // We don't emit every partial chunk to avoid flooding Linear
       // The final response will be posted as a comment
     },
   });
+
+  watchdog.stop();
 
   // Extract output text from payloads
   const payloads = result.payloads ?? [];
@@ -202,6 +268,17 @@ async function runEmbedded(
     .map((p) => p.text)
     .filter(Boolean)
     .join("\n\n");
+
+  // Check if watchdog killed the run
+  if (watchdog.wasKilled) {
+    const silenceSec = Math.round(watchdog.silenceMs / 1000);
+    api.logger.warn(`Embedded agent killed by watchdog: agent=${agentId} session=${sessionId} silence=${silenceSec}s`);
+    return {
+      success: false,
+      output: outputText || `Agent killed by inactivity watchdog after ${silenceSec}s of silence.`,
+      watchdogKilled: true,
+    };
+  }
 
   if (result.meta?.error) {
     api.logger.error(`Embedded agent error: ${result.meta.error.kind}: ${result.meta.error.message}`);

@@ -1,39 +1,101 @@
 # @calltelemetry/openclaw-linear
 
-An OpenClaw plugin that connects your Linear workspace to AI agents. Issues get triaged automatically, agents respond to @mentions, and a worker-audit pipeline runs when you assign work to the agent.
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.2+-blue)](https://github.com/calltelemetry/openclaw)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+An OpenClaw plugin that connects Linear to AI agents. Issues get triaged automatically, agents respond to `@mentions`, and a worker-audit pipeline runs when you assign work -- with an inactivity watchdog that kills and respawns stuck sessions.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [How It Works](#how-it-works)
+- [Architecture](#architecture)
+- [Project Layout](#project-layout)
+- [Getting Started](#getting-started)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Prompt Customization](#prompt-customization)
+- [Notifications](#notifications)
+- [Coding Tool](#coding-tool-code_run)
+- [Inactivity Watchdog](#inactivity-watchdog)
+- [CLI Reference](#cli-reference)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+---
 
 ## Features
 
-- **Auto-triage** -- New issues get story point estimates, labels, and priority automatically
-- **@mention routing** -- `@qa`, `@infra`, `@docs` in comments route to specialized agents
-- **Worker-audit pipeline** -- Assign an issue and a worker implements it, then an independent auditor verifies the work against the issue's definition of done
-- **Hard-enforced audit** -- The audit triggers automatically in plugin code, not as an LLM decision. Workers cannot self-certify completion.
-- **Branded replies** -- Each agent posts with its own name and avatar in Linear
-- **Real-time progress** -- Agent activity (thinking, acting, responding) shows in Linear's UI
-- **Unified `code_run` tool** -- One tool, three coding CLI backends (Codex, Claude Code, Gemini CLI), configurable per agent
-- **Issue management via `linearis`** -- Agents use the `linearis` CLI to update status, close issues, add comments, and more
-- **Customizable prompts** -- Worker, audit, and rework prompts live in `prompts.yaml`, editable without rebuilding
-- **Discord notifications** -- Optional dispatch lifecycle notifications to a Discord channel
+| Feature | Description |
+|---------|-------------|
+| **Auto-triage** | New issues get story point estimates, labels, and priority automatically |
+| **@mention routing** | `@qa`, `@infra`, `@docs` in comments route to specialized agents |
+| **Worker-audit pipeline** | Assign an issue and a worker implements it, then an independent auditor verifies |
+| **Hard-enforced audit** | Audit triggers in plugin code, not as an LLM decision. Workers cannot self-certify. |
+| **Inactivity watchdog** | Kills agent sessions with no I/O, retries once, escalates on double failure |
+| **Branded replies** | Each agent posts with its own name and avatar in Linear |
+| **Real-time progress** | Agent activity (thinking, acting, responding) streams to Linear's UI |
+| **Unified `code_run`** | One tool, three backends (Codex, Claude Code, Gemini), configurable per agent |
+| **Issue management** | Agents use `linearis` CLI to update status, close issues, add comments |
+| **Customizable prompts** | `prompts.yaml` -- edit worker, audit, and rework prompts without rebuilding |
+| **Discord notifications** | Dispatch lifecycle events posted to a Discord channel |
+| **Artifact logging** | Every dispatch writes structured logs to `.claw/` in the worktree |
+
+---
+
+## How It Works
+
+```
+  You                       Linear                    Plugin                     AI Agents
+   |                          |                         |                           |
+   |  Create issue            |                         |                           |
+   |  ----------------------> |  Webhook (Issue.create)  |                           |
+   |                          |  ----------------------> |  Triage agent             |
+   |                          |                         |  -----------------------> |
+   |                          |                         |  <-- estimate + labels --- |
+   |                          |  <-- update issue ----- |                           |
+   |                          |  <-- post assessment -- |                           |
+   |                          |                         |                           |
+   |  Assign to agent         |                         |                           |
+   |  ----------------------> |  Webhook (Issue.update)  |                           |
+   |                          |  ----------------------> |  Worker agent             |
+   |                          |                         |  -----------------------> |
+   |                          |  <-- streaming status -- |  <-- implements --------- |
+   |                          |                         |  Audit agent (automatic)  |
+   |                          |                         |  -----------------------> |
+   |                          |                         |  <-- JSON verdict -------- |
+   |                          |  <-- result comment --- |                           |
+   |                          |                         |                           |
+   |  Comment "@qa review"    |                         |                           |
+   |  ----------------------> |  Webhook (Comment)       |                           |
+   |                          |  ----------------------> |  QA agent                 |
+   |                          |                         |  -----------------------> |
+   |                          |  <-- branded comment -- |  <-- response ----------- |
+```
+
+---
 
 ## Architecture
 
 ### Dispatch Pipeline (v2)
 
-When an issue is assigned to the agent, the plugin runs a multi-stage pipeline with hard-enforced audit:
+When an issue is assigned, the plugin runs a multi-stage pipeline:
 
 ```
   Issue Assigned
        |
        v
   +-----------------+
-  |  DISPATCH       |  Tier assessment, worktree creation,
-  |                 |  dispatch state registration
+  |  DISPATCH       |  Tier assessment (junior/medior/senior),
+  |                 |  worktree creation, state registration
   +-----------------+
        |
        v
   +-----------------+
-  |  WORKER         |  Plans approach, implements solution,
-  |  (sub-agent)    |  posts summary comment on the issue.
+  |  WORKER         |  Plans + implements solution.
+  |  (sub-agent)    |  Posts summary comment.
   |                 |  CANNOT mark issue as Done.
   +-----------------+
        |
@@ -54,100 +116,128 @@ When an issue is assigned to the agent, the plugin runs a multi-stage pipeline w
   +-----------------+
 ```
 
-**What's hard-enforced vs. LLM-mediated:**
+### Hard-Enforced vs. LLM-Mediated
 
 | Layer | Mechanism | Can be skipped? |
 |-------|-----------|-----------------|
 | Worker spawn | Plugin code (`runAgent`) | No |
 | Audit trigger | Plugin code (fires after worker completes) | No |
 | Verdict processing | Plugin code (pass/fail/escalate) | No |
-| Worker implementation | LLM-mediated (the agent decides how to code) | N/A |
-| Audit evaluation | LLM-mediated (the agent decides if criteria are met) | N/A |
+| Inactivity watchdog | Plugin code (timer-based kill + retry) | No |
+| Worker implementation | LLM-mediated (agent decides how to code) | N/A |
+| Audit evaluation | LLM-mediated (agent decides if criteria are met) | N/A |
 
 ### State Machine
 
 ```
-DISPATCHED --> WORKING --> AUDITING --> DONE
-                 ^            |
-                 |    FAIL ---+  (attempt++ if <= max)
-                 +------------+  (re-enter WORKING)
-                              |
-               (attempt > max) --> STUCK
+                                  watchdog kill 2x
+                                  +-----------------+
+                                  |                 v
+DISPATCHED --> WORKING --> AUDITING --> DONE       STUCK
+                 ^            |                     ^
+                 |    FAIL ---+  (attempt++)        |
+                 +------------+                     |
+                              |                     |
+               (attempt > max) --------------------+
 ```
 
-All state transitions use compare-and-swap (CAS) to prevent races from duplicate webhooks or concurrent events. `dispatch-state.json` is the canonical source of truth; Linear labels are derived side effects.
+All transitions use compare-and-swap (CAS) to prevent races. `dispatch-state.json` is the canonical source of truth.
 
-### Webhook Flow
-
-```
-  Linear                  OpenClaw Gateway              AI Agents
-    |                           |                          |
-    |  Webhook (issue created)  |                          |
-    |  -----------------------> |                          |
-    |                           |  Dispatch triage agent   |
-    |                           |  ----------------------> |
-    |                           |                          |
-    |                           |  Estimate + labels       |
-    |                           |  <---------------------- |
-    |  Update issue             |                          |
-    |  <----------------------- |                          |
-    |  Post assessment comment  |                          |
-    |  <----------------------- |                          |
-```
+### Webhook Event Router
 
 ```
-  Linear                  OpenClaw Gateway              AI Agents
-    |                           |                          |
-    |  "@qa check this"         |                          |
-    |  -----------------------> |                          |
-    |                           |  Route to QA agent       |
-    |                           |  ----------------------> |
-    |                           |                          |
-    |                           |  Response                |
-    |                           |  <---------------------- |
-    |  Comment from "QA"        |                          |
-    |  <----------------------- |                          |
+POST /linear/webhook
+  |
+  +-- AgentSessionEvent.created  --> Dispatch pipeline (worker + audit)
+  +-- AgentSessionEvent.prompted --> Resume session (user follow-up)
+  +-- Comment.create             --> Route @mention to role-based agent
+  +-- Issue.create               --> Auto-triage (estimate, labels, priority)
+  +-- Issue.update               --> Dispatch if assigned to agent
+  +-- AppUserNotification        --> Direct agent response
 ```
+
+All handlers respond `200 OK` within 5 seconds (Linear requirement), then process asynchronously.
 
 ### Two Webhook Systems
 
 Linear delivers events through two separate webhook paths:
 
-1. **Workspace webhook** (Settings > API > Webhooks) -- handles Comment, Issue, and User events
-2. **OAuth app webhook** (Settings > API > Applications > your app) -- handles `AgentSessionEvent` (created/prompted)
+1. **Workspace webhook** (Settings > API > Webhooks) -- Comment, Issue, User events
+2. **OAuth app webhook** (Settings > API > Applications) -- `AgentSessionEvent` (created/prompted)
 
-Both must point to the same URL: `https://<your-domain>/linear/webhook`
+Both must point to: `https://<your-domain>/linear/webhook`
 
-### Source Layout
+### Deduplication
+
+A 60-second sliding window prevents double-handling:
+
+| Key Pattern | Prevents |
+|---|---|
+| `session:{id}` | Same session processed by both Issue.update and AgentSessionEvent |
+| `comment:{id}` | Same comment webhook delivered twice |
+| `assigned:{issueId}:{viewerId}` | Rapid re-assignment events |
+| `issue-create:{id}` | Duplicate Issue.create webhooks |
+
+---
+
+## Project Layout
 
 ```
-index.ts                  Plugin entry point, agent_end hook, notifier setup
-prompts.yaml              Externalized worker/audit/rework prompt templates
-src/
-  webhook.ts              Webhook handler -- routes events to agents, dispatches pipeline
-  pipeline.ts             v2 pipeline: spawnWorker, triggerAudit, processVerdict
-  dispatch-state.ts       File-backed state with CAS transitions, session map, idempotency
-  dispatch-service.ts     Background service -- stale detection, recovery, cleanup
-  notify.ts               Notification provider (Discord + noop fallback)
-  agent.ts                Agent execution wrapper (embedded runner + subprocess fallback)
-  active-session.ts       In-process session registry (issueId -> session)
-  tier-assess.ts          Issue complexity assessment (junior/medior/senior)
-
-  code-tool.ts            Unified code_run tool -- dispatches to configured backend
-  cli-shared.ts           Shared helpers for CLI tools (buildLinearApi, resolveSession)
-  codex-tool.ts           Codex CLI runner (JSONL stream -> Linear activities)
-  claude-tool.ts          Claude Code CLI runner (JSONL stream -> Linear activities)
-  gemini-tool.ts          Gemini CLI runner (JSONL stream -> Linear activities)
-  coding-tools.json       Backend config (default tool, per-agent overrides, aliases)
-
-  tools.ts                Tool registration (code_run + orchestration)
-  orchestration-tools.ts  spawn_agent / ask_agent for multi-agent delegation
-  linear-api.ts           Linear GraphQL API client, token resolution, activity streaming
-  auth.ts                 OAuth token management and profile storage
-  oauth-callback.ts       OAuth callback handler
-  cli.ts                  CLI subcommands (auth, status, worktrees, prompts)
-  codex-worktree.ts       Git worktree management for isolated runs
+openclaw-linear/
+|-- index.ts                  Plugin entry point, route/hook/service registration
+|-- openclaw.plugin.json      Plugin metadata and config schema
+|-- prompts.yaml              Externalized worker/audit/rework prompt templates
+|-- coding-tools.json         Backend config (default tool, per-agent overrides)
+|-- package.json
+|-- README.md
+|-- docs/
+|   |-- architecture.md       Internal architecture reference
+|   +-- troubleshooting.md    Diagnostic commands and common issues
++-- src/
+    |
+    |-- Webhook & Pipeline
+    |   |-- webhook.ts            Event router -- 6 webhook handlers, dispatch logic
+    |   |-- pipeline.ts           v2 pipeline: spawnWorker, triggerAudit, processVerdict
+    |   |-- dispatch-state.ts     File-backed state, CAS transitions, session mapping
+    |   |-- dispatch-service.ts   Background monitor: stale detection, recovery, cleanup
+    |   +-- active-session.ts     In-memory session registry (issueId -> session)
+    |
+    |-- Agent Execution
+    |   |-- agent.ts              Embedded runner + subprocess fallback, retry on watchdog kill
+    |   |-- watchdog.ts           InactivityWatchdog class + per-agent config resolver
+    |   +-- tier-assess.ts        Issue complexity assessment (junior/medior/senior)
+    |
+    |-- Coding Tool Backends
+    |   |-- code-tool.ts          Unified code_run dispatcher
+    |   |-- cli-shared.ts         Shared helpers (buildLinearApi, resolveSession, defaults)
+    |   |-- claude-tool.ts        Claude Code CLI runner (JSONL -> Linear activities)
+    |   |-- codex-tool.ts         Codex CLI runner (JSONL -> Linear activities)
+    |   +-- gemini-tool.ts        Gemini CLI runner (JSONL -> Linear activities)
+    |
+    |-- Linear API & Auth
+    |   |-- linear-api.ts         GraphQL client, token resolution, auto-refresh
+    |   |-- auth.ts               OAuth provider registration
+    |   +-- oauth-callback.ts     HTTP handler for OAuth redirect
+    |
+    |-- Tools & Orchestration
+    |   |-- tools.ts              Tool registration (code_run + orchestration)
+    |   +-- orchestration-tools.ts  spawn_agent / ask_agent for multi-agent delegation
+    |
+    |-- Artifacts & Notifications
+    |   |-- artifacts.ts          .claw/ directory: manifest, logs, verdicts, summaries
+    |   +-- notify.ts             Discord notifier (+ noop fallback)
+    |
+    |-- Infrastructure
+    |   |-- cli.ts                CLI subcommands (auth, status, worktrees, prompts)
+    |   +-- codex-worktree.ts     Git worktree create/remove/status/PR helpers
+    |
+    +-- Tests
+        |-- webhook.test.ts       Webhook handler tests
+        |-- watchdog.test.ts      Watchdog timer + config resolver tests
+        +-- agent.test.ts         Agent retry wrapper tests
 ```
+
+---
 
 ## Getting Started
 
@@ -177,7 +267,7 @@ Save the **Client ID** and **Client Secret**.
 
 ### 3. Set Credentials
 
-Add to your gateway's environment (systemd service or shell):
+Add to your gateway environment or plugin config:
 
 ```bash
 export LINEAR_CLIENT_ID="your_client_id"
@@ -196,13 +286,13 @@ Then reload: `systemctl --user daemon-reload && systemctl --user restart opencla
 
 ### 4. Expose the Gateway
 
-Linear needs to reach your gateway over HTTPS to deliver webhooks. A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) is the recommended approach -- no open ports, no TLS certificates to manage.
+Linear needs HTTPS access to deliver webhooks. [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) is recommended.
 
 ```bash
-# Install cloudflared (RHEL/Rocky/Alma)
-sudo dnf install -y cloudflared
+# Install cloudflared
+sudo dnf install -y cloudflared   # RHEL/Rocky/Alma
 
-# Authenticate and create tunnel
+# Create and configure tunnel
 cloudflared tunnel login
 cloudflared tunnel create openclaw
 cloudflared tunnel route dns openclaw linear.yourdomain.com
@@ -242,21 +332,16 @@ curl -s https://linear.yourdomain.com/linear/webhook \
 openclaw openclaw-linear auth
 ```
 
-This opens your browser to authorize the agent. After authorization, restart the gateway:
+This opens your browser to authorize the agent. Then restart and verify:
 
 ```bash
 systemctl --user restart openclaw-gateway
-```
-
-Verify it's working:
-
-```bash
 openclaw openclaw-linear status
 ```
 
 ### 6. Configure Agents
 
-Create `~/.openclaw/agent-profiles.json` to define your agent team:
+Create `~/.openclaw/agent-profiles.json`:
 
 ```json
 {
@@ -266,20 +351,28 @@ Create `~/.openclaw/agent-profiles.json` to define your agent team:
       "mission": "Full-stack engineer. Plans, implements, and ships code.",
       "isDefault": true,
       "mentionAliases": ["coder"],
-      "avatarUrl": "https://example.com/coder.png"
+      "avatarUrl": "https://example.com/coder.png",
+      "watchdog": {
+        "inactivitySec": 180,
+        "maxTotalSec": 7200,
+        "toolTimeoutSec": 900
+      }
     },
     "qa": {
       "label": "QA",
       "mission": "Test engineer. Quality guardian, test strategy.",
-      "mentionAliases": ["qa", "tester"]
+      "mentionAliases": ["qa", "tester"],
+      "watchdog": {
+        "inactivitySec": 120,
+        "maxTotalSec": 3600,
+        "toolTimeoutSec": 600
+      }
     }
   }
 }
 ```
 
-Each agent name must match an agent definition in your `~/.openclaw/openclaw.json`.
-
-One agent must be marked `isDefault: true` -- this is the agent that handles issue assignments and the dispatch pipeline.
+Each agent name must match an agent in `~/.openclaw/openclaw.json`. One agent must have `isDefault: true` -- this agent handles issue assignments and the dispatch pipeline.
 
 ### 7. Configure Coding Tools
 
@@ -287,7 +380,7 @@ Create `coding-tools.json` in the plugin root:
 
 ```json
 {
-  "codingTool": "codex",
+  "codingTool": "claude",
   "agentCodingTools": {},
   "backends": {
     "claude": { "aliases": ["claude", "claude code", "anthropic"] },
@@ -311,7 +404,7 @@ echo "lin_api_YOUR_KEY" > ~/.linear_api_token
 systemctl --user restart openclaw-gateway
 ```
 
-Check the logs for a clean startup:
+Check logs for a clean startup:
 
 ```
 [plugins] Linear agent extension registered (agent: default, token: profile,
@@ -327,6 +420,8 @@ curl -s -X POST https://your-domain.com/linear/webhook \
 # Should return: "ok"
 ```
 
+---
+
 ## Usage
 
 Once set up, the plugin responds to Linear events automatically:
@@ -334,7 +429,7 @@ Once set up, the plugin responds to Linear events automatically:
 | What you do in Linear | What happens |
 |---|---|
 | Create a new issue | Agent triages it (estimate, labels, priority) and posts an assessment |
-| Assign an issue to the agent | Worker-audit pipeline runs: implement, then independent audit |
+| Assign an issue to the agent | Worker-audit pipeline runs with watchdog protection |
 | Trigger an agent session | Agent responds directly in the session |
 | Comment `@qa check the tests` | QA agent responds with its expertise |
 | Ask "close this issue" | Agent runs `linearis issues update API-123 --status Done` |
@@ -344,17 +439,68 @@ Once set up, the plugin responds to Linear events automatically:
 
 When an issue is assigned:
 
-1. **Tier assessment** -- The plugin evaluates issue complexity (junior/medior/senior) and selects an appropriate model
-2. **Worktree creation** -- A git worktree is created for isolated work
-3. **Worker runs** -- The worker agent plans and implements the solution, posts a summary comment
-4. **Audit runs** -- An independent audit agent reads the issue body (source of truth), verifies acceptance criteria, runs tests, and returns a JSON verdict
-5. **Verdict** -- If the audit passes, the issue is marked done. If it fails, the worker is re-spawned with the audit gaps (up to `maxReworkAttempts` times). If it fails too many times, the issue is marked stuck and an escalation notification is sent.
+1. **Tier assessment** -- Evaluates complexity (junior/medior/senior), selects model tier
+2. **Worktree creation** -- Isolated git worktree for the implementation
+3. **Worker runs** -- Worker agent plans and implements, posts summary comment
+4. **Audit runs** -- Independent auditor verifies against issue body, returns JSON verdict
+5. **Verdict** -- Pass: issue done. Fail: worker re-spawns with gaps (up to `maxReworkAttempts`). Too many failures: stuck + escalation notification.
+6. **Watchdog** -- If the worker goes silent (no I/O), the watchdog kills it and retries once. Double failure escalates to stuck.
 
-Workers **cannot** mark issues as done or modify issue status -- that's handled entirely by the plugin's verdict processing code.
+Workers **cannot** mark issues as done -- that's handled entirely by plugin verdict processing code.
+
+---
+
+## Configuration
+
+### Plugin Config
+
+Set in `openclaw.json` under the plugin entry:
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `defaultAgentId` | string | `"default"` | Agent ID for pipeline workers and audit |
+| `enableAudit` | boolean | `true` | Run auditor stage after implementation |
+| `enableOrchestration` | boolean | `true` | Allow `spawn_agent`/`ask_agent` tools |
+| `codexBaseRepo` | string | `"/home/claw/ai-workspace"` | Git repo for worktrees |
+| `codexModel` | string | -- | Default Codex model |
+| `codexTimeoutMs` | number | `600000` | Legacy timeout for coding CLIs (ms) |
+| `worktreeBaseDir` | string | `"~/.openclaw/worktrees"` | Base directory for worktrees |
+| `dispatchStatePath` | string | `"~/.openclaw/linear-dispatch-state.json"` | Dispatch state file |
+| `flowDiscordChannel` | string | -- | Discord channel ID for notifications |
+| `promptsPath` | string | -- | Override path for `prompts.yaml` |
+| `maxReworkAttempts` | number | `2` | Max audit failures before escalation |
+| `inactivitySec` | number | `120` | Kill sessions with no I/O for this long |
+| `maxTotalSec` | number | `7200` | Max total agent session runtime |
+| `toolTimeoutSec` | number | `600` | Max runtime for a single `code_run` invocation |
+
+### Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `LINEAR_CLIENT_ID` | Yes | OAuth app client ID |
+| `LINEAR_CLIENT_SECRET` | Yes | OAuth app client secret |
+| `LINEAR_API_KEY` | No | Personal API key (fallback if no OAuth) |
+| `LINEAR_REDIRECT_URI` | No | Override the OAuth callback URL |
+| `OPENCLAW_GATEWAY_PORT` | No | Gateway port (default: 18789) |
+
+### Agent Profile Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `label` | Yes | Display name on Linear comments |
+| `mission` | Yes | Role description (injected as context) |
+| `isDefault` | One agent | Handles triage and the dispatch pipeline |
+| `mentionAliases` | Yes | `@mention` triggers (e.g., `["qa", "tester"]`) |
+| `avatarUrl` | No | Avatar URL for branded comments |
+| `watchdog.inactivitySec` | No | Inactivity kill threshold (default: 120) |
+| `watchdog.maxTotalSec` | No | Max total session runtime (default: 7200) |
+| `watchdog.toolTimeoutSec` | No | Max single `code_run` runtime (default: 600) |
+
+---
 
 ## Prompt Customization
 
-Worker, audit, and rework prompts are externalized in `prompts.yaml`. Edit them to customize agent behavior without rebuilding the plugin.
+Worker, audit, and rework prompts live in `prompts.yaml`. Edit to customize without rebuilding.
 
 ### Managing Prompts
 
@@ -374,11 +520,9 @@ openclaw openclaw-linear prompts validate   # Validate structure and template va
 | `{{worktreePath}}` | Path to the git worktree |
 | `{{tier}}` | Assessed complexity tier |
 | `{{attempt}}` | Current attempt number (0-based) |
-| `{{gaps}}` | Audit gaps from previous failed attempt (rework only) |
+| `{{gaps}}` | Audit gaps from previous attempt (rework only) |
 
 ### Override Path
-
-Set `promptsPath` in plugin config to load prompts from a custom location:
 
 ```json
 {
@@ -394,11 +538,11 @@ Set `promptsPath` in plugin config to load prompts from a custom location:
 }
 ```
 
+---
+
 ## Notifications
 
-The plugin can post dispatch lifecycle events to a Discord channel. Configure `flowDiscordChannel` in plugin config with the channel ID.
-
-Events posted:
+Configure `flowDiscordChannel` in plugin config with a Discord channel ID. Events:
 
 | Event | Message |
 |---|---|
@@ -406,20 +550,25 @@ Events posted:
 | Worker started | `**API-123** worker started (attempt 0)` |
 | Audit in progress | `**API-123** audit in progress` |
 | Audit passed | `**API-123** passed audit. PR ready.` |
-| Audit failed | `**API-123** failed audit (attempt 1). Gaps: missing test coverage` |
+| Audit failed | `**API-123** failed audit (attempt 1). Gaps: ...` |
 | Escalation | `**API-123** needs human review -- audit failed 3x` |
+| Watchdog kill | `**API-123** killed by watchdog (no I/O for 120s). Retrying.` |
+
+---
 
 ## Coding Tool (`code_run`)
 
-The plugin provides a single `code_run` tool that dispatches to one of three coding CLI backends. Agents call `code_run` without needing to know which backend is active.
+One tool dispatches to three CLI backends. Agents call `code_run` without knowing which backend is active.
 
 ### Supported Backends
 
 | Backend | CLI | Stream Format | Key Flags |
 |---|---|---|---|
-| **Codex** (OpenAI) | `codex` | JSONL | `--full-auto`, `-q` |
-| **Claude Code** (Anthropic) | `claude` | JSONL (`stream-json`) | `--print`, `--dangerously-skip-permissions`, `--verbose` |
+| **Claude Code** (Anthropic) | `claude` | JSONL (`stream-json`) | `--print`, `--dangerously-skip-permissions` |
+| **Codex** (OpenAI) | `codex` | JSONL | `--full-auto`, `--ephemeral` |
 | **Gemini CLI** (Google) | `gemini` | JSONL (`stream-json`) | `--yolo`, `-o stream-json` |
+
+All three backends have inactivity watchdog protection. Each line of JSONL output ticks the watchdog timer. If a CLI goes silent beyond the configured threshold, the process is killed with SIGTERM (+ SIGKILL after 5s).
 
 ### Backend Resolution Priority
 
@@ -428,61 +577,105 @@ The plugin provides a single `code_run` tool that dispatches to one of three cod
 3. **Global default** -- `codingTool` in `coding-tools.json`
 4. **Hardcoded fallback** -- `"claude"`
 
-## Linear Issue Management (`linearis` Skill)
+---
 
-Issue management is handled by the **`linearis`** CLI, installed as an OpenClaw skill. Agents use `linearis` via exec.
+## Inactivity Watchdog
 
-```bash
-linearis issues list -l 20               # List recent issues
-linearis issues search "auth bug"         # Full-text search
-linearis issues read API-123              # Get issue details
-linearis issues update API-123 --status "Done"
-linearis issues update API-123 --labels "Bug" --label-by adding
-linearis comments create API-123 --body "Fixed in PR #456"
-linearis usage                            # Full command reference
+Agent sessions can go silent when LLM providers rate-limit, APIs hang, or CLI tools lock up. The watchdog detects silence and kills stuck sessions.
+
+### How It Works
+
+```
+  Agent starts
+       |
+       v
+  Watchdog timer starts (inactivitySec countdown)
+       |
+       +-- Every I/O event (JSONL line, stderr, stream callback) --> timer resets
+       |
+       +-- No I/O for inactivitySec --> KILL
+       |       |
+       |       v
+       |   Retry once (automatic)
+       |       |
+       |       +-- Success --> continue pipeline (audit)
+       |       +-- Killed again --> STUCK (escalation)
+       |
+       +-- Total runtime exceeds maxTotalSec --> KILL (no retry)
 ```
 
-## Configuration Reference
+### Three Timeout Dimensions
 
-### Plugin Config
+| Timeout | Scope | Default | Description |
+|---------|-------|---------|-------------|
+| `inactivitySec` | Per I/O gap | 120s (2 min) | Kill if no stdout/stderr/callback for this long |
+| `maxTotalSec` | Per agent session | 7200s (2 hrs) | Hard ceiling on total session runtime |
+| `toolTimeoutSec` | Per `code_run` call | 600s (10 min) | Max runtime for a single CLI invocation |
 
-Set in `openclaw.json` under the plugin entry:
+### Config Resolution Order
 
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `defaultAgentId` | string | `"default"` | Agent ID for pipeline workers and audit |
-| `enableAudit` | boolean | `true` | Run the auditor stage after implementation |
-| `enableOrchestration` | boolean | `true` | Allow agents to use `spawn_agent`/`ask_agent` |
-| `codexBaseRepo` | string | `"/home/claw/ai-workspace"` | Git repo path for worktrees |
-| `codexModel` | string | -- | Default Codex model |
-| `codexTimeoutMs` | number | `600000` | Default timeout for coding CLIs (ms) |
-| `worktreeBaseDir` | string | `"~/.openclaw/worktrees"` | Base directory for persistent git worktrees |
-| `dispatchStatePath` | string | `"~/.openclaw/linear-dispatch-state.json"` | Path to dispatch state file |
-| `flowDiscordChannel` | string | -- | Discord channel ID for lifecycle notifications |
-| `promptsPath` | string | -- | Override path for `prompts.yaml` |
-| `maxReworkAttempts` | number | `2` | Max audit failures before escalation |
+1. **Agent profile** -- `~/.openclaw/agent-profiles.json` `agents.{id}.watchdog`
+2. **Plugin config** -- `openclaw.json` `inactivitySec` / `maxTotalSec` / `toolTimeoutSec`
+3. **Hardcoded defaults** -- 120s / 7200s / 600s
 
-### Environment Variables
+### Per-Agent Configuration
 
-| Variable | Required | Description |
-|---|---|---|
-| `LINEAR_CLIENT_ID` | Yes | OAuth app client ID |
-| `LINEAR_CLIENT_SECRET` | Yes | OAuth app client secret |
-| `LINEAR_API_KEY` | No | Personal API key (fallback if no OAuth) |
-| `LINEAR_REDIRECT_URI` | No | Override the OAuth callback URL |
-| `OPENCLAW_GATEWAY_PORT` | No | Gateway port (default: 18789) |
+```json
+{
+  "agents": {
+    "coder": {
+      "watchdog": {
+        "inactivitySec": 180,
+        "maxTotalSec": 7200,
+        "toolTimeoutSec": 900
+      }
+    },
+    "reviewer": {
+      "watchdog": {
+        "inactivitySec": 60,
+        "maxTotalSec": 600,
+        "toolTimeoutSec": 300
+      }
+    }
+  }
+}
+```
 
-### Agent Profile Fields
+### Artifact Logging
 
-| Field | Required | Description |
-|---|---|---|
-| `label` | Yes | Display name shown on comments in Linear |
-| `mission` | Yes | Role description (injected as context) |
-| `isDefault` | One agent | Handles issue triage and the dispatch pipeline |
-| `mentionAliases` | Yes | `@mention` triggers (e.g., `["qa", "tester"]`) |
-| `avatarUrl` | No | Avatar for branded comments |
+Every dispatch writes structured artifacts to `.claw/` in the worktree:
 
-### CLI
+```
+.claw/
+  manifest.json       Issue metadata + lifecycle timestamps
+  plan.md             Implementation plan
+  worker-{N}.md       Worker output per attempt (truncated to 8KB)
+  audit-{N}.json      Audit verdict per attempt
+  log.jsonl           Append-only structured interaction log
+  summary.md          Agent-curated final summary
+```
+
+Watchdog kills are logged to `log.jsonl` with phase `"watchdog"`:
+
+```json
+{
+  "ts": "2026-02-18T12:00:00Z",
+  "phase": "watchdog",
+  "attempt": 0,
+  "agent": "coder",
+  "success": false,
+  "watchdog": {
+    "reason": "inactivity",
+    "silenceSec": 120,
+    "thresholdSec": 120,
+    "retried": true
+  }
+}
+```
+
+---
+
+## CLI Reference
 
 ```bash
 openclaw openclaw-linear auth              # Run OAuth authorization
@@ -493,6 +686,8 @@ openclaw openclaw-linear prompts show      # Print current prompts
 openclaw openclaw-linear prompts path      # Print resolved prompts file path
 openclaw openclaw-linear prompts validate  # Validate prompt structure
 ```
+
+---
 
 ## Troubleshooting
 
@@ -510,6 +705,8 @@ openclaw openclaw-linear prompts validate        # Are prompts valid?
 
 | Problem | Cause | Fix |
 |---|---|---|
+| Agent goes silent, no response | LLM provider timeout or rate limit | Watchdog auto-kills after `inactivitySec` and retries. Check logs for `Watchdog KILL`. |
+| Dispatch stuck after watchdog | Both retry attempts failed | Check `.claw/log.jsonl` for watchdog entries. Re-assign issue to retry. |
 | Agent says "closing" but doesn't | No issue management tool | Install `linearis`: `npx clawhub install linearis` |
 | `code_run` uses wrong backend | Config mismatch | Check `coding-tools.json` |
 | Claude Code "nested session" error | `CLAUDECODE` env var set | Plugin handles this automatically |
@@ -517,7 +714,10 @@ openclaw openclaw-linear prompts validate        # Are prompts valid?
 | Webhook events not arriving | Wrong URL | Both webhooks must point to `/linear/webhook` |
 | OAuth token expired | Tokens expire ~24h | Auto-refreshes; restart gateway if stuck |
 | Audit always fails | Bad prompt template | Run `openclaw openclaw-linear prompts validate` |
-| Dispatch stuck | Worker timed out or crashed | Check `dispatch-state.json`, re-assign issue |
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed diagnostic commands.
+
+---
 
 ## License
 

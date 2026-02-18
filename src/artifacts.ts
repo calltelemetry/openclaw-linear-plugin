@@ -45,15 +45,23 @@ export interface ClawManifest {
   plugin: string;
 }
 
+export interface WatchdogLogDetail {
+  reason: "inactivity";
+  silenceSec: number;
+  thresholdSec: number;
+  retried: boolean;
+}
+
 export interface LogEntry {
   ts: string;
-  phase: "worker" | "audit" | "verdict" | "dispatch";
+  phase: "worker" | "audit" | "verdict" | "dispatch" | "watchdog";
   attempt: number;
   agent: string;
   prompt: string;
   outputPreview: string;
   success: boolean;
   durationMs?: number;
+  watchdog?: WatchdogLogDetail;
 }
 
 // ---------------------------------------------------------------------------

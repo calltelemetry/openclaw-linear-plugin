@@ -2,337 +2,381 @@
 
 Internal reference for developers and maintainers of the Linear agent plugin.
 
+---
+
 ## System Topology
 
 ```
-                          Linear App
-                       (OAuth App Webhook)
-                             |
-                             | HTTPS POST
-                             v
-                    ┌─────────────────┐
-                    │   Cloudflare    │
-                    │   Tunnel        │
-                    │ (cloudflared)   │
-                    └────────┬────────┘
-                             |
-                 linear.yourdomain.com
-                             |
-                             v
-                    ┌─────────────────┐
-                    │   Auth Proxy    │
-                    │ (linear-proxy)  │
-                    │   :18790        │
-                    │  Adds Bearer    │
-                    │  auth header    │
-                    └────────┬────────┘
-                             |
-                             v
-                    ┌─────────────────┐
-                    │   OpenClaw      │
-                    │   Gateway       │
-                    │   :18789        │
-                    └────────┬────────┘
-                             |
-              ┌──────────────┼──────────────┐
-              |              |              |
-              v              v              v
-     /linear/webhook   /linear/oauth   /hooks/linear
-     (primary route)   /callback        (back-compat)
-              |
-              v
-     ┌─────────────────┐
-     │  Webhook Router  │
-     │  (webhook.ts)    │
-     └────────┬─────────┘
-              |
-    ┌─────────┼──────────┬──────────────┬──────────────┐
-    v         v          v              v              v
- AgentSess  Comment   Issue.update   Issue.create   AppUser
- Event      .create   (assign/       (auto-triage)  Notification
- (pipeline) (@mention  delegate)
-             routing)
+                        Linear App
+                     (OAuth App Webhook)
+                           |
+                           | HTTPS POST
+                           v
+                  +-------------------+
+                  |   Cloudflare      |
+                  |   Tunnel          |
+                  |   (cloudflared)   |
+                  +--------+----------+
+                           |
+               linear.yourdomain.com
+                           |
+                           v
+                  +-------------------+
+                  |   OpenClaw        |
+                  |   Gateway         |
+                  |   :18789          |
+                  +--------+----------+
+                           |
+            +--------------+--------------+
+            |              |              |
+            v              v              v
+   /linear/webhook   /linear/oauth   /hooks/linear
+   (primary route)   /callback        (back-compat)
+            |
+            v
+   +-------------------+
+   |  Webhook Router   |
+   |  (webhook.ts)     |
+   +--------+----------+
+            |
+  +---------+---------+---------------+---------------+
+  v         v         v               v               v
+AgentSess  Comment  Issue.update    Issue.create    AppUser
+Event      .create  (assign/        (auto-triage)   Notification
+(pipeline) (@mention delegate)
+            routing)
 ```
 
 ## Webhook Event Types
 
-All events arrive via the OAuth app webhook. The router dispatches by `payload.type`:
+All events arrive via POST. The router dispatches by `payload.type`:
 
-```
-POST /linear/webhook
-  |
-  +-- AgentSessionEvent.created  --> 3-stage pipeline (plan -> implement -> audit)
-  +-- AgentSessionEvent.prompted --> Resume pipeline (user approved plan)
-  +-- AppUserNotification        --> Direct agent response to mention/assignment
-  +-- Comment.create             --> Route @mention to role-based sub-agent
-  +-- Issue.create               --> Auto-triage new issues (estimate, labels, priority)
-  +-- Issue.update               --> Triage if assigned/delegated to app user
-```
+| Event | Trigger | Handler |
+|-------|---------|---------|
+| `AgentSessionEvent.created` | Agent session opened in Linear UI | Full dispatch pipeline |
+| `AgentSessionEvent.prompted` | User follow-up in existing session | Resume with streaming |
+| `Comment.create` | `@mention` in a comment | Route to role-based agent |
+| `Issue.create` | New issue created | Auto-triage (estimate, labels, priority) |
+| `Issue.update` | Issue assigned/delegated to agent | Dispatch pipeline |
+| `AppUserNotification` | Agent mentioned/assigned via OAuth app | Direct response |
 
 All handlers respond `200 OK` within 5 seconds (Linear requirement), then process asynchronously.
 
 **Payload structure differences:**
 - Workspace events: `type=Comment action=create`, data at `payload.data`
-- OAuth app events: `type=AgentSessionEvent action=created`, session at `payload.agentSession`, also has `previousComments`, `guidance`, `promptContext`
-- Important: the actual values are `AgentSessionEvent`/`created`, NOT `AgentSession`/`create`
+- OAuth events: `type=AgentSessionEvent action=created`, session at `payload.agentSession`
+- Important: `AgentSessionEvent`/`created`, NOT `AgentSession`/`create`
+
+---
 
 ## Pipeline Stages
 
 ```
-AgentSessionEvent.created
-         |
-         | respond 200 within 5s
-         | emit "thought" within 10s
-         v
-  ┌──────────────┐
-  │  Stage 1:    │
-  │  PLANNER     │  5 min timeout
-  │              │  Reads issue context
-  │              │  Emits "action" activities
-  │              │  Posts plan as Linear comment
-  │              │  Emits "elicitation" (asks for approval)
-  └──────┬───────┘
-         |
-         | user replies → AgentSessionEvent.prompted
-         v
-  ┌──────────────┐
-  │  Stage 2:    │
-  │  IMPLEMENTOR │  10 min timeout
-  │              │  Executes approved plan
-  │              │  Writes code, creates commits
-  │              │  Creates PR if needed
-  └──────┬───────┘
-         |
-         v
-  ┌──────────────┐
-  │  Stage 3:    │
-  │  AUDITOR     │  5 min timeout
-  │              │  Reviews implementation vs plan
-  │              │  Posts audit summary
-  │              │  Emits "response" (closes session)
-  └──────────────┘
+Issue Assigned (webhook)
+       |
+       v
+  +-----------+
+  | DISPATCH  |  transitionDispatch(dispatched -> working)
+  |           |  Tier assessment, worktree setup
+  +-----------+
+       |
+       v
+  +-----------+    watchdog                     +-----------+
+  | WORKER    | -- kill 2x ------------------>  |  STUCK    |
+  | (runAgent)|    |                            | (escalate)|
+  +-----------+    | retry once                 +-----------+
+       |           v
+       |    +-----------+
+       |    | WORKER    | (attempt 2)
+       |    | (retry)   |
+       |    +-----------+
+       |           |
+       +-----+-----+
+             |
+             v
+  +-----------+
+  | AUDIT     |  triggerAudit()
+  | (runAgent)|  Independent auditor
+  +-----------+
+       |
+       v
+  +-----------+
+  | VERDICT   |  processVerdict()
+  +-----------+
+       |
+   +---+---+
+   |       |
+   v       v
+  PASS    FAIL
+   |       |
+   v       +-- attempt <= max --> rework (back to WORKER)
+  DONE     +-- attempt > max  --> STUCK (escalation)
 ```
 
-## @Mention Routing Flow
+### Worker Phase (`spawnWorker`)
+
+1. Transitions `dispatched -> working` (CAS)
+2. Fetches issue details from Linear GraphQL API
+3. Builds task prompt from `prompts.yaml` templates
+4. Registers session mapping for `agent_end` hook
+5. Calls `runAgent()` with streaming callbacks
+6. Saves output to `.claw/worker-{N}.md`
+7. Appends structured log to `.claw/log.jsonl`
+8. If `watchdogKilled`: logs artifact, transitions to `stuck`, sends notification
+9. Otherwise: triggers `triggerAudit()`
+
+### Audit Phase (`triggerAudit`)
+
+1. Dedup via `markEventProcessed()`
+2. Transitions `working -> auditing` (CAS)
+3. Builds audit prompt from `prompts.yaml`
+4. Spawns independent auditor via `runAgent()`
+5. Passes result to `processVerdict()`
+
+### Verdict Phase (`processVerdict`)
+
+1. Parses JSON verdict: `{"pass": true/false, "criteria": [...], "gaps": [...], "testResults": "..."}`
+2. **Pass**: transition to `done`, write summary to `.claw/`, post approval comment
+3. **Fail (retries left)**: transition back to `working`, increment attempt, re-spawn worker with gaps
+4. **Fail (max reached)**: transition to `stuck`, post escalation comment, notify
+
+---
+
+## Agent Execution (`agent.ts`)
+
+### Embedded Runner (primary)
+
+Uses OpenClaw's `extensionAPI.runEmbeddedPiAgent()` for in-process execution with real-time streaming.
+
+```
+runAgent()
+    |
+    v
+runAgentOnce()
+    |
+    +-- streaming available? --> runEmbedded()
+    |       |
+    |       +-- AbortController + InactivityWatchdog
+    |       +-- onReasoningStream  --> watchdog.tick() + emit thought
+    |       +-- onToolResult       --> watchdog.tick() + emit action
+    |       +-- onAgentEvent       --> watchdog.tick() + emit action
+    |       +-- onPartialReply     --> watchdog.tick()
+    |       +-- watchdog.wasKilled --> { success: false, watchdogKilled: true }
+    |
+    +-- no streaming --> runSubprocess()  (fallback: openclaw agent --json)
+```
+
+### Retry Wrapper
+
+`runAgent()` wraps `runAgentOnce()` with retry-on-watchdog-kill:
+
+1. First attempt runs normally
+2. If `watchdogKilled: true`: log warning, emit Linear activity, retry once
+3. Second failure: return as-is (caller handles escalation)
+4. Non-watchdog failures: no retry
+
+---
+
+## Inactivity Watchdog (`watchdog.ts`)
+
+### InactivityWatchdog Class
+
+- `start()` -- begin watching (idempotent)
+- `tick()` -- reset countdown (`lastActivityAt = Date.now()`)
+- `stop()` -- clean shutdown
+- `wasKilled` / `silenceMs` -- query state after completion
+
+Timer uses dynamic rescheduling: calculates remaining time from last tick, not fixed polling. Minimum check interval: 1 second.
+
+### Kill Flow
+
+```
+Timer fires
+    |
+    v
+silence = now - lastActivityAt
+    |
+    +-- silence >= threshold --> killed = true, call onKill()
+    +-- silence < threshold  --> reschedule for remaining time
+```
+
+**onKill callback by context:**
+- Embedded runner: `controller.abort()` + `ext.abortEmbeddedPiRun(sessionId)`
+- CLI tools: `child.kill("SIGTERM")` + 5s `child.kill("SIGKILL")`
+
+### Config Resolution
+
+```
+1. ~/.openclaw/agent-profiles.json  agents.{agentId}.watchdog
+       | not found
+       v
+2. pluginConfig  inactivitySec / maxTotalSec / toolTimeoutSec
+       | not found
+       v
+3. Hardcoded defaults: 120s / 7200s / 600s
+```
+
+All config values are in **seconds**. The resolver converts to ms internally.
+
+---
+
+## Dispatch State (`dispatch-state.ts`)
+
+File-backed persistent state at `~/.openclaw/linear-dispatch-state.json`:
+
+```json
+{
+  "dispatches": {
+    "active": { "API-123": { "status": "working", "attempt": 0, ... } },
+    "completed": [ { "identifier": "API-122", "status": "done", ... } ]
+  },
+  "sessionMap": { "linear-worker-API-123-0": { "dispatchId": "API-123", "phase": "worker" } },
+  "processedEvents": ["worker-end:...", "audit-end:..."]
+}
+```
+
+### Atomic Operations
+
+- **File locking**: exclusive lock before read-modify-write (30s stale threshold)
+- **CAS transitions**: `transitionDispatch(id, expectedStatus, newStatus)` throws `TransitionError` on mismatch
+- **Session mapping**: maps worker/audit session keys to dispatch context for `agent_end` hook lookup
+- **Event dedup**: `markEventProcessed()` -- trimmed to last 200 entries
+
+### Background Monitor (`dispatch-service.ts`)
+
+Runs on 5-minute tick (zero LLM tokens):
+1. **Stale detection**: marks dispatches inactive >2h as `stuck`
+2. **Recovery**: finds dispatches with worker complete but audit missing
+3. **Pruning**: removes completed entries older than 7 days
+
+---
+
+## Artifact System (`artifacts.ts`)
+
+Per-worktree `.claw/` directory (gitignored):
+
+| File | Content |
+|------|---------|
+| `manifest.json` | Issue metadata, tier, model, timestamps, status |
+| `plan.md` | Implementation plan |
+| `worker-{N}.md` | Worker output per attempt (truncated to 8KB) |
+| `audit-{N}.json` | Audit verdict per attempt |
+| `log.jsonl` | Append-only structured log (all phases including watchdog) |
+| `summary.md` | Agent-curated final summary |
+
+Summaries are also written to the orchestrator's `memory/` directory for long-term indexing.
+
+---
+
+## @Mention Routing
 
 ```
 Linear comment "@qa review this test plan"
-  → Plugin matches "qa" in mentionAliases
-  → Looks up agent-profiles.json → finds "qa" profile
-  → Dispatches: openclaw agent --agent qa --message "<context>"
-  → OpenClaw loads "qa" agent config from openclaw.json
-  → Agent runs with the qa profile's mission as context
-  → Response posted back to Linear as branded comment
+  -> Plugin matches "qa" in mentionAliases
+  -> Looks up agent-profiles.json -> finds "qa" profile
+  -> Dispatches: openclaw agent --agent qa --message "<context>"
+  -> Response posted as branded comment (avatar + label)
 ```
 
-For agent sessions (triggered by the Linear agent UI or app @mentions):
+---
+
+## Coding Tool Backends
+
+The unified `code_run` tool dispatches to a configured CLI backend:
 
 ```
-Linear AgentSessionEvent.created
-  → Plugin resolves the default agent (isDefault: true)
-  → Runs the 3-stage pipeline (plan → implement → audit)
-  → Each stage dispatches via the default agent's openclaw.json config
-```
-
-## Codex Integration
-
-The implementor pipeline stage can delegate coding tasks to OpenAI Codex via the `codex_run` tool.
-
-```
-Agent calls codex_run(prompt, issueIdentifier, agentSessionId)
+Agent calls code_run(prompt, ...)
       |
       v
-  Create git worktree from ai-workspace
-  /tmp/codex-{issue}-{ts} on branch codex/{issue}
+  Resolve backend (explicit > per-agent > global > "claude")
       |
       v
-  spawn: codex exec --full-auto --json --ephemeral -C {worktree}
+  spawn: {cli} {args} (JSONL streaming)
       |
-      | stdout: JSONL events (line by line)
-      |
-      +-- item.started (reasoning)     → Linear "thought" activity
-      +-- item.completed (command)     → Linear "action" activity
-      +-- item.completed (file_changes)→ Linear "action" activity
-      +-- item.completed (message)     → collected for final output
-      +-- turn.completed               → session done
+      +-- InactivityWatchdog monitors stdout/stderr
+      +-- JSONL events mapped to Linear activities
+      +-- On close: distinguish inactivity_timeout vs wall-clock timeout
       |
       v
-  Return { success, output, filesChanged, worktreePath, branch }
+  Return { success, output, error? }
 ```
 
-Worktrees share git history with the base repo, so Codex has full context. Branches are named `codex/{issue-identifier}` for tracking.
+Backend-specific error types:
+- `"timeout"` -- wall-clock timeout reached
+- `"inactivity_timeout"` -- watchdog killed (no I/O)
+- `"exit N"` -- CLI exited with non-zero code
+
+---
 
 ## Agent Orchestration
 
-Agents can delegate to other crew members at any point during their run:
-
 | Tool | Behavior | Use Case |
 |------|----------|----------|
-| `spawn_agent` | Fire-and-forget (non-blocking) | Parallel sub-tasks: "kaylee, investigate DB perf" |
-| `ask_agent` | Synchronous wait for reply | Blocking questions: "wash, would this break tests?" |
+| `spawn_agent` | Fire-and-forget | Parallel sub-tasks |
+| `ask_agent` | Synchronous wait | Blocking questions |
 
-Both tools use `runAgent()` under the hood (subprocess via `openclaw agent --json`).
+Both use `runAgent()` under the hood.
 
-The pipeline makes these available at each stage:
-- **Planner** — no orchestration (single-agent analysis)
-- **Implementor** — `codex_run` + `spawn_agent` + `ask_agent`
-- **Auditor** — `ask_agent` + `spawn_agent` (for specialized reviews)
+---
 
-## OAuth Flow
+## Token Resolution
 
 ```
-  User                   Gateway                    Linear
-   |                        |                          |
-   |  Browser opens         |                          |
-   |  auth URL with         |                          |
-   |  actor=app scope       |                          |
-   |  ──────────────────────────────────────────────> |
-   |                        |                          |
-   |  Approve permissions   |                          |
-   |  <─────────────────────────── redirect ─────── |
-   |                        |                          |
-   |  GET /linear/oauth     |                          |
-   |  /callback?code=xxx    |                          |
-   |  ─────────────────────>|                          |
-   |                        |  POST /oauth/token       |
-   |                        |  code + client_id/secret |
-   |                        |  ─────────────────────> |
-   |                        |                          |
-   |                        |  { access_token,         |
-   |                        |    refresh_token,         |
-   |                        |    expires_in, scope }    |
-   |                        |  <───────────────────── |
-   |                        |                          |
-   |                        | Store in                 |
-   |                        | auth-profiles.json       |
-   |  "OAuth Complete"      |                          |
-   |  <─────────────────────|                          |
-```
-
-## Token Resolution Priority
-
-```
-1. pluginConfig.accessToken (static — rarely used)
-       │ not found
+1. pluginConfig.accessToken (static)
+       | not found
        v
-2. ~/.openclaw/auth-profiles.json "linear:default"
-   (OAuth token — preferred for agent scopes)
-       │ not found
+2. ~/.openclaw/auth-profiles.json "linear:default" (OAuth -- preferred)
+       | not found
        v
-3. LINEAR_ACCESS_TOKEN or LINEAR_API_KEY env var
-   (personal key fallback — no agent session support)
-       │ not found
+3. LINEAR_ACCESS_TOKEN or LINEAR_API_KEY env var (fallback)
+       | not found
        v
-4. No token → warning logged, webhooks fail gracefully
+4. No token -> warning, webhooks fail gracefully
 ```
 
-**Auth header distinction:** OAuth tokens use `Bearer` prefix; personal API keys do not.
+OAuth tokens auto-refresh 60s before expiry. On 401, forces refresh and retries once.
 
-### Token Refresh
+**Auth header:** OAuth tokens use `Bearer` prefix; personal API keys do not.
 
-OAuth tokens expire (~24h). The `LinearAgentApi` auto-refreshes:
-
-1. Before each API call, checks `expiresAt` with 60s buffer
-2. Calls Linear's token endpoint with `grant_type=refresh_token`
-3. Persists new tokens back to `~/.openclaw/auth-profiles.json`
-4. On 401 response, forces refresh and retries once
-
-## Triage System
-
-On `Issue.update` (assignment/delegation) and `Issue.create`:
-
-```
-Issue assigned/created
-      |
-      v
-  Fetch issue details + team labels (GraphQL)
-      |
-      v
-  Dispatch default agent with triage prompt
-      |
-      v
-  Agent returns JSON:
-  { "estimate": 5, "labelIds": [...], "priority": 3, "assessment": "..." }
-      |
-      v
-  Apply estimate, labels, priority via issueUpdate mutation
-      |
-      v
-  Strip JSON block, post assessment as branded comment
-```
-
-## Deduplication
-
-A 60-second sliding window prevents double-handling:
-
-| Key Pattern | Prevents |
-|---|---|
-| `session:{id}` | Same AgentSession processed by both Issue.update and AgentSessionEvent |
-| `comment:{id}` | Same comment webhook delivered twice |
-| `assigned:{issueId}:{viewerId}` | Rapid re-assignment events |
-| `delegated:{issueId}:{viewerId}` | Rapid re-delegation events |
-| `issue-create:{id}` | Duplicate Issue.create webhooks |
-
-## Branded Comments
-
-Responses are posted back to Linear with agent branding:
-
-1. **Primary:** `createAsUser` + `displayIconUrl` (shows as the agent's avatar/name)
-2. **Fallback:** `**[AgentLabel]** response text` prefix if branding API fails
-
-## Narration Guard
-
-Catches short agent responses that narrate intent without acting (e.g., "Let me explore the codebase...") and appends a warning. Triggered on `message_sending` events for responses under 250 characters matching patterns like:
-
-- `let me explore/look/investigate/check...`
-- `I'll explore/look into/investigate...`
-
-## Linear GraphQL API Reference
-
-### Key Mutations
-
-| Mutation | Purpose |
-|---|---|
-| `agentActivityCreate` | Emit thought/action/response/elicitation/error to agent session |
-| `agentSessionUpdate` | Set external URLs, plan on a session |
-| `agentSessionCreateOnIssue` | Create a new agent session on an issue |
-| `commentCreate` | Post a comment (supports `createAsUser` + `displayIconUrl` branding) |
-| `issueUpdate` | Update estimate, labels, priority, state |
-| `reactionCreate` | React to a comment (e.g., eyes emoji to acknowledge) |
-
-### Activity Types
-
-| Type | When Used |
-|---|---|
-| `thought` | Agent is analyzing/reviewing (shown as thinking indicator) |
-| `action` | Agent is performing a step (with action + parameter + result) |
-| `response` | Final response (closes the agent session) |
-| `elicitation` | Asking user for input (e.g., plan approval) |
-| `error` | Something failed (shown as error state) |
+---
 
 ## File Structure
 
 ```
 linear/
-├── index.ts              # Entry point — registers routes, tools, CLI, narration guard
-├── openclaw.plugin.json  # Plugin metadata and config schema
-├── package.json          # Package definition
-├── README.md
-├── docs/
-│   ├── architecture.md   # This file — internals reference
-│   └── troubleshooting.md  # Diagnostic commands, common issues
-└── src/
-    ├── agent.ts              # Agent dispatch via `openclaw agent` CLI
-    ├── auth.ts               # OAuth provider registration + token refresh
-    ├── cli.ts                # CLI commands: auth, status
-    ├── client.ts             # Basic GraphQL client (used by agent tools)
-    ├── codex-tool.ts         # Codex CLI wrapper — JSONL streaming → Linear activities
-    ├── codex-worktree.ts     # Git worktree create/remove/status/PR helpers
-    ├── linear-api.ts         # Full GraphQL API wrapper (LinearAgentApi) with auto-refresh
-    ├── oauth-callback.ts     # HTTP handler for OAuth redirect callback
-    ├── orchestration-tools.ts # spawn_agent + ask_agent crew delegation tools
-    ├── pipeline.ts           # 3-stage pipeline (plan → implement → audit)
-    ├── tools.ts              # Agent tools (Linear + Codex + orchestration)
-    ├── webhook.ts            # Webhook dispatcher — 6 event handlers
-    └── webhook.test.ts       # Vitest tests
+|-- index.ts                  Entry point -- routes, tools, CLI, hooks, narration guard
+|-- openclaw.plugin.json      Plugin metadata and config schema
+|-- package.json
+|-- prompts.yaml              Externalized prompt templates
+|-- coding-tools.json         Backend configuration
+|-- README.md
+|-- docs/
+|   |-- architecture.md       This file
+|   +-- troubleshooting.md    Diagnostic commands and common issues
++-- src/
+    |-- webhook.ts             Event router (6 handlers, dedup, dispatch)
+    |-- pipeline.ts            v2 pipeline: spawnWorker, triggerAudit, processVerdict
+    |-- dispatch-state.ts      File-backed state, CAS, session map, idempotency
+    |-- dispatch-service.ts    Background monitor (stale, recovery, prune)
+    |-- active-session.ts      In-memory session registry
+    |-- agent.ts               Embedded runner + subprocess, watchdog + retry
+    |-- watchdog.ts            InactivityWatchdog class + config resolver
+    |-- tier-assess.ts         Complexity assessment (junior/medior/senior)
+    |-- code-tool.ts           Unified code_run dispatcher
+    |-- cli-shared.ts          Shared CLI helpers and defaults
+    |-- claude-tool.ts         Claude Code runner (JSONL + watchdog)
+    |-- codex-tool.ts          Codex runner (JSONL + watchdog)
+    |-- gemini-tool.ts         Gemini runner (JSONL + watchdog)
+    |-- tools.ts               Tool registration (code_run + orchestration)
+    |-- orchestration-tools.ts spawn_agent / ask_agent
+    |-- linear-api.ts          GraphQL client, token resolution, auto-refresh
+    |-- auth.ts                OAuth provider registration
+    |-- oauth-callback.ts      OAuth callback handler
+    |-- cli.ts                 CLI subcommands
+    |-- codex-worktree.ts      Git worktree management
+    |-- artifacts.ts           .claw/ directory artifacts + memory integration
+    |-- notify.ts              Discord notifier (+ noop fallback)
+    |-- webhook.test.ts        Webhook tests
+    |-- watchdog.test.ts       Watchdog timer + config tests
+    +-- agent.test.ts          Agent retry wrapper tests
 ```

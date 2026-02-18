@@ -3,7 +3,8 @@ import type { LinearAgentApi } from "./linear-api.js";
 import { resolveLinearToken, LinearAgentApi as LinearAgentApiClass } from "./linear-api.js";
 import { getCurrentSession, getActiveSessionByIdentifier } from "./active-session.js";
 
-export const DEFAULT_TIMEOUT_MS = 10 * 60_000; // 10 minutes
+export const DEFAULT_TIMEOUT_MS = 10 * 60_000; // 10 minutes (legacy — prefer watchdog config)
+export { DEFAULT_INACTIVITY_SEC, DEFAULT_MAX_TOTAL_SEC, DEFAULT_TOOL_TIMEOUT_SEC } from "./watchdog.js";
 export const DEFAULT_BASE_REPO = "/home/claw/ai-workspace";
 
 export interface CliToolParams {
