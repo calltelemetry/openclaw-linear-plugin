@@ -138,7 +138,6 @@ export async function runClaude(
   if (model ?? pluginConfig?.claudeModel) {
     args.push("--model", (model ?? pluginConfig?.claudeModel) as string);
   }
-  args.push("-C", workingDir);
   args.push("-p", prompt);
 
   api.logger.info(`Claude exec: ${CLAUDE_BIN} ${args.join(" ").slice(0, 200)}...`);
@@ -150,6 +149,7 @@ export async function runClaude(
 
     const child = spawn(CLAUDE_BIN, args, {
       stdio: ["ignore", "pipe", "pipe"],
+      cwd: workingDir,
       env,
       timeout: 0,
     });

@@ -1,6 +1,35 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { mkdirSync, readFileSync } from "node:fs";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { LinearAgentApi, ActivityContent } from "./linear-api.js";
+
+// ---------------------------------------------------------------------------
+// Agent directory resolution (config-based, not ext API which ignores agentId)
+// ---------------------------------------------------------------------------
+
+interface AgentDirs {
+  workspaceDir: string;
+  agentDir: string;
+}
+
+function resolveAgentDirs(agentId: string, config: Record<string, any>): AgentDirs {
+  const home = process.env.HOME ?? "/home/claw";
+  const agentList = config?.agents?.list as Array<Record<string, any>> | undefined;
+  const agentEntry = agentList?.find((a) => a.id === agentId);
+
+  // Workspace: agent-specific override → agents.defaults.workspace → fallback
+  const workspaceDir = agentEntry?.workspace
+    ?? config?.agents?.defaults?.workspace
+    ?? join(home, ".openclaw", "workspace");
+
+  // Agent runtime dir: always ~/.openclaw/agents/{agentId}/agent
+  // (matches OpenClaw's internal structure)
+  const agentDir = join(home, ".openclaw", "agents", agentId, "agent");
+  mkdirSync(agentDir, { recursive: true });
+
+  return { workspaceDir, agentDir };
+}
 
 // Import extensionAPI for embedded agent runner (internal, not in public SDK)
 let _extensionAPI: typeof import("/home/claw/.npm-global/lib/node_modules/openclaw/dist/extensionAPI.js") | null = null;
@@ -66,17 +95,22 @@ async function runEmbedded(
 ): Promise<AgentRunResult> {
   const ext = await getExtensionAPI();
 
-  const workspaceDir = ext.resolveAgentWorkspaceDir({ agentId });
-  const sessionFile = ext.resolveSessionFilePath(sessionId);
-  const agentDir = ext.resolveAgentDir({ agentId });
+  // Load config so we can resolve agent dirs and providers correctly.
+  const config = await api.runtime.config.loadConfig();
+  const configAny = config as Record<string, any>;
+
+  // Resolve workspace and agent dirs from config (ext API ignores agentId).
+  const dirs = resolveAgentDirs(agentId, configAny);
+  const { workspaceDir, agentDir } = dirs;
   const runId = randomUUID();
 
-  // Load config so embedded runner can resolve providers, API keys, etc.
-  const config = await api.runtime.config.loadConfig();
+  // Build session file path under the correct agent's sessions directory.
+  const sessionsDir = join(agentDir, "sessions");
+  try { mkdirSync(sessionsDir, { recursive: true }); } catch {}
+  const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
 
   // Resolve model/provider from config — default is anthropic which requires
   // a separate API key. Our agents use openrouter.
-  const configAny = config as Record<string, any>;
   const agentList = configAny?.agents?.list as Array<Record<string, any>> | undefined;
   const agentEntry = agentList?.find((a) => a.id === agentId);
   const modelRef: string =
@@ -89,7 +123,7 @@ async function runEmbedded(
   const provider = slashIdx > 0 ? modelRef.slice(0, slashIdx) : ext.DEFAULT_PROVIDER;
   const model = slashIdx > 0 ? modelRef.slice(slashIdx + 1) : modelRef;
 
-  api.logger.info(`Embedded agent run: agent=${agentId} session=${sessionId} runId=${runId} provider=${provider} model=${model}`);
+  api.logger.info(`Embedded agent run: agent=${agentId} session=${sessionId} runId=${runId} provider=${provider} model=${model} workspaceDir=${workspaceDir} agentDir=${agentDir}`);
 
   const emit = (content: ActivityContent) => {
     streaming.linearApi.emitActivity(streaming.agentSessionId, content).catch((err) => {

@@ -196,15 +196,21 @@ export default function register(api: OpenClawPluginApi) {
     try {
       const raw = execFileSync(bin, ["--version"], {
         encoding: "utf8",
-        timeout: 5_000,
+        timeout: 15_000,
         env: { ...process.env, CLAUDECODE: undefined } as any,
       }).trim();
       cliChecks[name] = raw || "unknown";
     } catch {
-      cliChecks[name] = "not found";
-      api.logger.warn(
-        `${name} CLI not found at ${bin}. The ${name}_run tool will fail. Install with: ${installCmd}`,
-      );
+      // Fallback: check if the file exists (execFileSync can fail in worker contexts)
+      try {
+        require("node:fs").accessSync(bin, require("node:fs").constants.X_OK);
+        cliChecks[name] = "installed (version check skipped)";
+      } catch {
+        cliChecks[name] = "not found";
+        api.logger.warn(
+          `${name} CLI not found at ${bin}. The ${name}_run tool will fail. Install with: ${installCmd}`,
+        );
+      }
     }
   }
 
