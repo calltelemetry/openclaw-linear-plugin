@@ -6,6 +6,7 @@ import { createLinearTools } from "./src/tools.js";
 import { handleLinearWebhook } from "./src/webhook.js";
 import { handleOAuthCallback } from "./src/oauth-callback.js";
 import { resolveLinearToken } from "./src/linear-api.js";
+import { createDispatchService } from "./src/dispatch-service.js";
 
 export default function register(api: OpenClawPluginApi) {
   const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
@@ -55,6 +56,9 @@ export default function register(api: OpenClawPluginApi) {
       await handleOAuthCallback(api, req, res);
     },
   });
+
+  // Register dispatch monitor service (stale detection, session hydration, cleanup)
+  api.registerService(createDispatchService(api));
 
   // Narration Guard: catch short "Let me explore..." responses that narrate intent
   // without actually calling tools, and append a warning for the user.

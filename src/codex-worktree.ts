@@ -1,17 +1,35 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync, readdirSync } from "node:fs";
+import { existsSync, statSync, readdirSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 
 const DEFAULT_BASE_REPO = "/home/claw/ai-workspace";
+const DEFAULT_WORKTREE_BASE_DIR = path.join(homedir(), ".openclaw", "worktrees");
 
 export interface WorktreeInfo {
   path: string;
   branch: string;
+  /** True if the worktree already existed and was resumed, not freshly created. */
+  resumed: boolean;
 }
 
 export interface WorktreeStatus {
   filesChanged: string[];
   hasUncommitted: boolean;
   lastCommit: string | null;
+}
+
+export interface WorktreeOptions {
+  /** Base git repo to create worktrees from. Default: /home/claw/ai-workspace */
+  baseRepo?: string;
+  /** Directory under which worktrees are created. Default: ~/.openclaw/worktrees */
+  baseDir?: string;
+}
+
+function resolveBaseDir(baseDir?: string): string {
+  if (!baseDir) return DEFAULT_WORKTREE_BASE_DIR;
+  if (baseDir.startsWith("~/")) return baseDir.replace("~", homedir());
+  return baseDir;
 }
 
 function git(args: string[], cwd: string): string {
@@ -23,41 +41,79 @@ function git(args: string[], cwd: string): string {
 }
 
 /**
- * Create a git worktree for isolated Codex work.
+ * Create a git worktree for isolated work on a Linear issue.
+ *
+ * Path: {baseDir}/{issueIdentifier}/ — deterministic, persistent.
  * Branch: codex/{issueIdentifier}
- * Path: /tmp/codex-{issueIdentifier}-{timestamp}
+ *
+ * Idempotent: if the worktree already exists, returns it without recreating.
+ * If the branch exists but the worktree is gone, recreates the worktree from
+ * the existing branch (resume scenario).
  */
 export function createWorktree(
   issueIdentifier: string,
-  baseRepo?: string,
+  opts?: WorktreeOptions,
 ): WorktreeInfo {
-  const repo = baseRepo ?? DEFAULT_BASE_REPO;
+  const repo = opts?.baseRepo ?? DEFAULT_BASE_REPO;
+  const baseDir = resolveBaseDir(opts?.baseDir);
+
   if (!existsSync(repo)) {
     throw new Error(`Base repo not found: ${repo}`);
   }
 
-  const branch = `codex/${issueIdentifier}`;
-  const ts = Date.now();
-  const worktreePath = `/tmp/codex-${issueIdentifier}-${ts}`;
+  // Ensure base directory exists
+  if (!existsSync(baseDir)) {
+    mkdirSync(baseDir, { recursive: true });
+  }
 
-  // Ensure we're on a clean base — fetch latest
+  const branch = `codex/${issueIdentifier}`;
+  const worktreePath = path.join(baseDir, issueIdentifier);
+
+  // Idempotent: if worktree already exists, return it
+  if (existsSync(worktreePath)) {
+    try {
+      // Verify it's a valid git worktree
+      git(["rev-parse", "--git-dir"], worktreePath);
+      return { path: worktreePath, branch, resumed: true };
+    } catch {
+      // Directory exists but isn't a valid worktree — remove and recreate
+      try {
+        git(["worktree", "remove", "--force", worktreePath], repo);
+      } catch { /* best effort */ }
+    }
+  }
+
+  // Fetch latest (best effort)
   try {
     git(["fetch", "origin"], repo);
   } catch {
     // Offline or no remote — continue with local state
   }
 
-  // Delete stale branch if it exists (from a previous run)
-  try {
-    git(["branch", "-D", branch], repo);
-  } catch {
-    // Branch doesn't exist — fine
+  // Check if branch already exists (resume scenario)
+  const branchExists = branchExistsInRepo(branch, repo);
+
+  if (branchExists) {
+    // Recreate worktree from existing branch — preserves previous work
+    git(["worktree", "add", worktreePath, branch], repo);
+    return { path: worktreePath, branch, resumed: true };
   }
 
-  // Create worktree with new branch off HEAD
+  // Fresh start: new branch off HEAD
   git(["worktree", "add", "-b", branch, worktreePath], repo);
+  return { path: worktreePath, branch, resumed: false };
+}
 
-  return { path: worktreePath, branch };
+/**
+ * Check if a branch exists in the repo.
+ */
+function branchExistsInRepo(branch: string, repo: string): boolean {
+  try {
+    const result = git(["branch", "--list", branch], repo);
+    return result.trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -117,19 +173,13 @@ export function removeWorktree(
   }
 
   if (opts?.deleteBranch) {
-    // Extract branch name from the worktree path convention
+    // Extract issue identifier from worktree path to find matching branch
+    const dirName = path.basename(worktreePath);
+    const branch = `codex/${dirName}`;
     try {
-      const branches = git(["branch", "--list", "codex/*"], repo);
-      // Only delete if it looks like a codex branch
-      for (const b of branches.split("\n")) {
-        const name = b.trim().replace(/^\* /, "");
-        if (name && worktreePath.includes(name.replace("codex/", ""))) {
-          git(["branch", "-D", name], repo);
-          break;
-        }
-      }
+      git(["branch", "-D", branch], repo);
     } catch {
-      // Best effort
+      // Branch doesn't exist or already deleted
     }
   }
 }
@@ -175,23 +225,23 @@ export function createPullRequest(
 export interface WorktreeEntry {
   path: string;
   branch: string;
+  issueIdentifier: string;
   ageMs: number;
   hasChanges: boolean;
 }
 
 /**
- * List all codex worktrees under /tmp.
+ * List all worktrees in the configured base directory.
  */
-export function listWorktrees(baseRepo?: string): WorktreeEntry[] {
-  const repo = baseRepo ?? DEFAULT_BASE_REPO;
+export function listWorktrees(opts?: WorktreeOptions): WorktreeEntry[] {
+  const baseDir = resolveBaseDir(opts?.baseDir);
   const entries: WorktreeEntry[] = [];
 
-  // Find /tmp/codex-* directories
+  if (!existsSync(baseDir)) return [];
+
   let dirs: string[];
   try {
-    dirs = readdirSync("/tmp")
-      .filter((d) => d.startsWith("codex-"))
-      .map((d) => `/tmp/${d}`);
+    dirs = readdirSync(baseDir).map((d) => path.join(baseDir, d));
   } catch {
     return [];
   }
@@ -201,6 +251,13 @@ export function listWorktrees(baseRepo?: string): WorktreeEntry[] {
     try {
       const stat = statSync(dir);
       if (!stat.isDirectory()) continue;
+
+      // Verify it's a git worktree
+      try {
+        git(["rev-parse", "--git-dir"], dir);
+      } catch {
+        continue; // Not a git worktree
+      }
 
       let branch = "unknown";
       try {
@@ -216,6 +273,7 @@ export function listWorktrees(baseRepo?: string): WorktreeEntry[] {
       entries.push({
         path: dir,
         branch,
+        issueIdentifier: path.basename(dir),
         ageMs: Date.now() - stat.mtimeMs,
         hasChanges,
       });
@@ -228,15 +286,15 @@ export function listWorktrees(baseRepo?: string): WorktreeEntry[] {
 }
 
 /**
- * Remove codex worktrees older than maxAgeMs.
+ * Remove worktrees older than maxAgeMs.
  * Returns list of removed paths.
  */
 export function pruneStaleWorktrees(
   maxAgeMs: number = 24 * 60 * 60_000,
-  opts?: { baseRepo?: string; dryRun?: boolean },
+  opts?: WorktreeOptions & { dryRun?: boolean },
 ): { removed: string[]; skipped: string[]; errors: string[] } {
+  const worktrees = listWorktrees(opts);
   const repo = opts?.baseRepo ?? DEFAULT_BASE_REPO;
-  const worktrees = listWorktrees(repo);
   const removed: string[] = [];
   const skipped: string[] = [];
   const errors: string[] = [];

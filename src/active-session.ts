@@ -7,7 +7,13 @@
  *
  * This runs in the gateway process. Tool execution also happens in the gateway,
  * so tools can read from this registry directly.
+ *
+ * The in-memory Map is the fast-path for tool lookups. On startup, the
+ * dispatch service calls hydrateFromDispatchState() to rebuild it from
+ * the persistent dispatch-state.json file.
  */
+
+import { readDispatchState } from "./dispatch-state.js";
 
 export interface ActiveSession {
   agentSessionId: string;
@@ -63,4 +69,38 @@ export function getCurrentSession(): ActiveSession | null {
     return sessions.values().next().value ?? null;
   }
   return null;
+}
+
+/**
+ * Hydrate the in-memory session Map from dispatch-state.json.
+ * Called on startup by the dispatch service to restore sessions
+ * that were active before a gateway restart.
+ *
+ * Returns the number of sessions restored.
+ */
+export async function hydrateFromDispatchState(configPath?: string): Promise<number> {
+  const state = await readDispatchState(configPath);
+  const active = state.dispatches.active;
+  let restored = 0;
+
+  for (const [, dispatch] of Object.entries(active)) {
+    if (dispatch.status === "dispatched" || dispatch.status === "running") {
+      sessions.set(dispatch.issueId, {
+        agentSessionId: dispatch.agentSessionId ?? "",
+        issueIdentifier: dispatch.issueIdentifier,
+        issueId: dispatch.issueId,
+        startedAt: new Date(dispatch.dispatchedAt).getTime(),
+      });
+      restored++;
+    }
+  }
+
+  return restored;
+}
+
+/**
+ * Get the count of currently tracked sessions.
+ */
+export function getSessionCount(): number {
+  return sessions.size;
 }

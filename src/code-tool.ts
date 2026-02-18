@@ -30,7 +30,7 @@ interface BackendConfig {
   aliases?: string[];
 }
 
-interface CodingToolsConfig {
+export interface CodingToolsConfig {
   codingTool?: string;
   agentCodingTools?: Record<string, string>;
   backends?: Record<string, BackendConfig>;
@@ -40,7 +40,7 @@ interface CodingToolsConfig {
  * Load coding tool config from the plugin's coding-tools.json file.
  * Falls back to empty config if the file doesn't exist or is invalid.
  */
-function loadCodingConfig(): CodingToolsConfig {
+export function loadCodingConfig(): CodingToolsConfig {
   try {
     // Resolve relative to the plugin root (one level up from src/)
     const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");

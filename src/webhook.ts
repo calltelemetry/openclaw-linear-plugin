@@ -3,9 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { LinearAgentApi, resolveLinearToken } from "./linear-api.js";
-// Pipeline is used from Issue.update delegation handler (not from agent session chat)
-// import { runFullPipeline, resumePipeline, type PipelineContext } from "./pipeline.js";
+import { runFullPipeline, type PipelineContext } from "./pipeline.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
+import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch } from "./dispatch-state.js";
+import { assessTier } from "./tier-assess.js";
+import { createWorktree } from "./codex-worktree.js";
 
 // ── Agent profiles (loaded from config, no hardcoded names) ───────
 interface AgentProfile {
@@ -858,7 +860,7 @@ export async function handleLinearWebhook(
     }
 
     const trigger = isDelegatedToUs ? "delegated" : "assigned";
-    api.logger.info(`Issue ${trigger} to our app user (${viewerId}), processing`);
+    api.logger.info(`Issue ${trigger} to our app user (${viewerId}), executing pipeline`);
 
     // Dedup on assignment/delegation
     const dedupKey = `${trigger}:${issue.id}:${viewerId}`;
@@ -867,200 +869,11 @@ export async function handleLinearWebhook(
       return true;
     }
 
-    const agentId = resolveAgentId(api);
-
-    // Fetch full issue details + team labels for triage
-    let enrichedIssue: any = issue;
-    let teamLabels: Array<{ id: string; name: string }> = [];
-    try {
-      enrichedIssue = await linearApi.getIssueDetails(issue.id);
-      if (enrichedIssue?.team?.id) {
-        teamLabels = await linearApi.getTeamLabels(enrichedIssue.team.id);
-      }
-    } catch (err) {
-      api.logger.warn(`Could not fetch issue details: ${err}`);
-    }
-
-    const description = enrichedIssue?.description ?? issue?.description ?? "(no description)";
-    const comments = enrichedIssue?.comments?.nodes ?? [];
-    const commentSummary = comments
-      .slice(-5)
-      .map((c: any) => `  - **${c.user?.name ?? "Unknown"}**: ${c.body?.slice(0, 200)}`)
-      .join("\n");
-
-    const estimationType = enrichedIssue?.team?.issueEstimationType ?? "fibonacci";
-    const currentLabels = enrichedIssue?.labels?.nodes ?? [];
-    const currentLabelNames = currentLabels.map((l: any) => l.name).join(", ") || "None";
-    const availableLabelList = teamLabels.map((l) => `  - "${l.name}" (id: ${l.id})`).join("\n");
-
-    const message = [
-      `IMPORTANT: You are triaging a delegated Linear issue. You MUST respond with a JSON block containing your triage decisions, followed by your assessment as plain text.`,
-      ``,
-      `## Issue: ${enrichedIssue?.identifier ?? issue.identifier ?? issue.id} — ${enrichedIssue?.title ?? issue.title ?? "(untitled)"}`,
-      `**Status:** ${enrichedIssue?.state?.name ?? "Unknown"} | **Current Estimate:** ${enrichedIssue?.estimate ?? "None"} | **Current Labels:** ${currentLabelNames}`,
-      ``,
-      `**Description:**`,
-      description,
-      commentSummary ? `\n**Recent comments:**\n${commentSummary}` : "",
-      ``,
-      `## Your Triage Tasks`,
-      ``,
-      `1. **Story Points** — Estimate complexity using ${estimationType} scale (1=trivial, 2=small, 3=medium, 5=large, 8=very large, 13=epic)`,
-      `2. **Labels** — Select appropriate labels from the team's available labels`,
-      `3. **Assessment** — Brief analysis of what this issue needs`,
-      ``,
-      `## Available Labels`,
-      availableLabelList || "  (no labels configured)",
-      ``,
-      `## Response Format`,
-      ``,
-      `You MUST start your response with a JSON block, then follow with your assessment:`,
-      ``,
-      '```json',
-      `{`,
-      `  "estimate": <number>,`,
-      `  "labelIds": ["<id1>", "<id2>"],`,
-      `  "assessment": "<one-line summary of your sizing rationale>"`,
-      `}`,
-      '```',
-      ``,
-      `Then write your full assessment as markdown below the JSON block.`,
-    ].filter(Boolean).join("\n");
-
-    // Dispatch agent with session lifecycle (non-blocking)
-    void (async () => {
-      const profiles = loadAgentProfiles();
-      const defaultProfile = Object.entries(profiles).find(([, p]) => p.isDefault);
-      const label = defaultProfile?.[1]?.label ?? profiles[agentId]?.label ?? agentId;
-      const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
-      let agentSessionId: string | null = null;
-
-      try {
-        const sessionResult = await linearApi.createSessionOnIssue(issue.id);
-        agentSessionId = sessionResult.sessionId;
-        if (agentSessionId) {
-          wasRecentlyProcessed(`session:${agentSessionId}`);
-          api.logger.info(`Created agent session ${agentSessionId} for ${trigger}`);
-          setActiveSession({
-            agentSessionId,
-            issueIdentifier: enrichedIssue?.identifier ?? issue.identifier ?? issue.id,
-            issueId: issue.id,
-            agentId,
-            startedAt: Date.now(),
-          });
-        } else {
-          api.logger.warn(`Could not create agent session for assignment: ${sessionResult.error ?? "unknown"}`);
-        }
-
-        if (agentSessionId) {
-          await linearApi.emitActivity(agentSessionId, {
-            type: "thought",
-            body: `Reviewing assigned issue ${enrichedIssue?.identifier ?? issue.id}...`,
-          }).catch(() => {});
-        }
-
-        if (agentSessionId) {
-          await linearApi.emitActivity(agentSessionId, {
-            type: "action",
-            action: "Triaging",
-            parameter: `${enrichedIssue?.identifier ?? issue.id} — estimating, labeling, sizing`,
-          }).catch(() => {});
-        }
-
-        const sessionId = `linear-assign-${issue.id}-${Date.now()}`;
-        const { runAgent } = await import("./agent.js");
-        const result = await runAgent({
-          api,
-          agentId,
-          sessionId,
-          message,
-          timeoutMs: 3 * 60_000,
-          streaming: agentSessionId ? { linearApi, agentSessionId } : undefined,
-        });
-
-        const responseBody = result.success
-          ? result.output
-          : `I encountered an error reviewing this assignment. Please try again.`;
-
-        // Parse triage JSON from agent response and apply to issue
-        let commentBody = responseBody;
-        if (result.success) {
-          const jsonMatch = responseBody.match(/```json\s*\n?([\s\S]*?)\n?```/);
-          if (jsonMatch) {
-            try {
-              const triage = JSON.parse(jsonMatch[1]);
-              const updateInput: Record<string, unknown> = {};
-
-              if (typeof triage.estimate === "number") {
-                updateInput.estimate = triage.estimate;
-              }
-              if (Array.isArray(triage.labelIds) && triage.labelIds.length > 0) {
-                // Merge with existing labels
-                const existingIds = currentLabels.map((l: any) => l.id);
-                const allIds = [...new Set([...existingIds, ...triage.labelIds])];
-                updateInput.labelIds = allIds;
-              }
-
-              if (Object.keys(updateInput).length > 0) {
-                await linearApi.updateIssue(issue.id, updateInput);
-                api.logger.info(`Applied triage to ${enrichedIssue?.identifier ?? issue.id}: ${JSON.stringify(updateInput)}`);
-
-                if (agentSessionId) {
-                  await linearApi.emitActivity(agentSessionId, {
-                    type: "action",
-                    action: "Applied triage",
-                    result: `estimate=${triage.estimate ?? "unchanged"}, labels=${triage.labelIds?.length ?? 0} added`,
-                  }).catch(() => {});
-                }
-              }
-
-              // Strip the JSON block from the comment — post only the assessment
-              commentBody = responseBody.replace(/```json\s*\n?[\s\S]*?\n?```\s*\n?/, "").trim();
-            } catch (parseErr) {
-              api.logger.warn(`Could not parse triage JSON: ${parseErr}`);
-            }
-          }
-        }
-
-        // Post comment with assessment
-        const brandingOpts = avatarUrl
-          ? { createAsUser: label, displayIconUrl: avatarUrl }
-          : undefined;
-
-        try {
-          if (brandingOpts) {
-            await linearApi.createComment(issue.id, commentBody, brandingOpts);
-          } else {
-            await linearApi.createComment(issue.id, `**[${label}]** ${commentBody}`);
-          }
-        } catch (brandErr) {
-          api.logger.warn(`Branded comment failed, falling back to prefix: ${brandErr}`);
-          await linearApi.createComment(issue.id, `**[${label}]** ${commentBody}`);
-        }
-
-        if (agentSessionId) {
-          const truncated = commentBody.length > 2000
-            ? commentBody.slice(0, 2000) + "…"
-            : commentBody;
-          await linearApi.emitActivity(agentSessionId, {
-            type: "response",
-            body: truncated,
-          }).catch(() => {});
-        }
-
-        api.logger.info(`Posted assignment response to ${enrichedIssue?.identifier ?? issue.id}`);
-      } catch (err) {
-        api.logger.error(`Issue assignment handler error: ${err}`);
-        if (agentSessionId) {
-          await linearApi.emitActivity(agentSessionId, {
-            type: "error",
-            body: `Failed to process assignment: ${String(err).slice(0, 500)}`,
-          }).catch(() => {});
-        }
-      } finally {
-        clearActiveSession(issue.id);
-      }
-    })();
+    // Assignment triggers the full dispatch pipeline:
+    // tier assessment → worktree → plan → implement → audit
+    void handleDispatch(api, linearApi, issue).catch((err) => {
+      api.logger.error(`Dispatch pipeline error for ${issue.identifier ?? issue.id}: ${err}`);
+    });
 
     return true;
   }
@@ -1289,4 +1102,203 @@ export async function handleLinearWebhook(
   res.statusCode = 200;
   res.end("ok");
   return true;
+}
+
+// ── @dispatch handler ─────────────────────────────────────────────
+//
+// Triggered by `@dispatch` in a Linear comment. Assesses issue complexity,
+// creates a persistent worktree, registers the dispatch in state, and
+// launches the pipeline (plan → implement → audit).
+
+async function handleDispatch(
+  api: OpenClawPluginApi,
+  linearApi: LinearAgentApi,
+  issue: any,
+): Promise<void> {
+  const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+  const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+  const worktreeBaseDir = pluginConfig?.worktreeBaseDir as string | undefined;
+  const baseRepo = (pluginConfig?.codexBaseRepo as string) ?? "/home/claw/ai-workspace";
+  const identifier = issue.identifier ?? issue.id;
+
+  api.logger.info(`@dispatch: processing ${identifier}`);
+
+  // 1. Check for existing active dispatch — reclaim if stale
+  const STALE_DISPATCH_MS = 30 * 60_000; // 30 min without a gateway holding it = stale
+  const state = await readDispatchState(statePath);
+  const existing = getActiveDispatch(state, identifier);
+  if (existing) {
+    const ageMs = Date.now() - new Date(existing.dispatchedAt).getTime();
+    const isStale = ageMs > STALE_DISPATCH_MS;
+    const inMemory = activeRuns.has(issue.id);
+
+    if (!isStale && inMemory) {
+      // Truly still running in this gateway process
+      api.logger.info(`dispatch: ${identifier} actively running (status: ${existing.status}, age: ${Math.round(ageMs / 1000)}s) — skipping`);
+      await linearApi.createComment(
+        issue.id,
+        `Already running as **${existing.tier}** (status: ${existing.status}, started ${Math.round(ageMs / 60_000)}m ago). Worktree: \`${existing.worktreePath}\``,
+      );
+      return;
+    }
+
+    // Stale or not in memory (gateway restarted) — reclaim
+    api.logger.info(
+      `dispatch: ${identifier} reclaiming stale dispatch (status: ${existing.status}, ` +
+      `age: ${Math.round(ageMs / 1000)}s, inMemory: ${inMemory}, stale: ${isStale})`,
+    );
+    await removeActiveDispatch(identifier, statePath);
+    activeRuns.delete(issue.id);
+  }
+
+  // 2. Prevent concurrent runs on same issue
+  if (activeRuns.has(issue.id)) {
+    api.logger.info(`@dispatch: ${identifier} has active agent run — skipping`);
+    return;
+  }
+
+  // 3. Fetch full issue details for tier assessment
+  let enrichedIssue: any;
+  try {
+    enrichedIssue = await linearApi.getIssueDetails(issue.id);
+  } catch (err) {
+    api.logger.error(`@dispatch: failed to fetch issue details: ${err}`);
+    enrichedIssue = issue;
+  }
+
+  const labels = enrichedIssue.labels?.nodes?.map((l: any) => l.name) ?? [];
+  const commentCount = enrichedIssue.comments?.nodes?.length ?? 0;
+
+  // 4. Assess complexity tier
+  const assessment = await assessTier(api, {
+    identifier,
+    title: enrichedIssue.title ?? "(untitled)",
+    description: enrichedIssue.description,
+    labels,
+    commentCount,
+  });
+
+  api.logger.info(`@dispatch: ${identifier} assessed as ${assessment.tier} (${assessment.model}) — ${assessment.reasoning}`);
+
+  // 5. Create persistent worktree
+  let worktree;
+  try {
+    worktree = createWorktree(identifier, { baseRepo, baseDir: worktreeBaseDir });
+    api.logger.info(`@dispatch: worktree ${worktree.resumed ? "resumed" : "created"} at ${worktree.path}`);
+  } catch (err) {
+    api.logger.error(`@dispatch: worktree creation failed: ${err}`);
+    await linearApi.createComment(
+      issue.id,
+      `Dispatch failed — could not create worktree: ${String(err).slice(0, 200)}`,
+    );
+    return;
+  }
+
+  // 6. Create agent session on Linear
+  let agentSessionId: string | undefined;
+  try {
+    const sessionResult = await linearApi.createSessionOnIssue(issue.id);
+    agentSessionId = sessionResult.sessionId ?? undefined;
+  } catch (err) {
+    api.logger.warn(`@dispatch: could not create agent session: ${err}`);
+  }
+
+  // 7. Register dispatch in persistent state
+  const now = new Date().toISOString();
+  await registerDispatch(identifier, {
+    issueId: issue.id,
+    issueIdentifier: identifier,
+    worktreePath: worktree.path,
+    branch: worktree.branch,
+    tier: assessment.tier,
+    model: assessment.model,
+    status: "dispatched",
+    dispatchedAt: now,
+    agentSessionId,
+  }, statePath);
+
+  // 8. Register active session for tool resolution
+  setActiveSession({
+    agentSessionId: agentSessionId ?? "",
+    issueIdentifier: identifier,
+    issueId: issue.id,
+    agentId: resolveAgentId(api),
+    startedAt: Date.now(),
+  });
+
+  // 9. Post dispatch confirmation comment
+  const statusComment = [
+    `**Dispatched** as **${assessment.tier}** (${assessment.model})`,
+    `> ${assessment.reasoning}`,
+    ``,
+    `Worktree: \`${worktree.path}\` ${worktree.resumed ? "(resumed)" : "(fresh)"}`,
+    `Branch: \`${worktree.branch}\``,
+  ].join("\n");
+
+  await linearApi.createComment(issue.id, statusComment);
+
+  if (agentSessionId) {
+    await linearApi.emitActivity(agentSessionId, {
+      type: "thought",
+      body: `Dispatching ${identifier} as ${assessment.tier}...`,
+    }).catch(() => {});
+  }
+
+  // 10. Apply tier label (best effort)
+  try {
+    if (enrichedIssue.team?.id) {
+      const teamLabels = await linearApi.getTeamLabels(enrichedIssue.team.id);
+      const tierLabel = teamLabels.find((l: any) => l.name === `developer:${assessment.tier}`);
+      if (tierLabel) {
+        const currentLabelIds = enrichedIssue.labels?.nodes?.map((l: any) => l.id) ?? [];
+        await linearApi.updateIssue(issue.id, {
+          labelIds: [...currentLabelIds, tierLabel.id],
+        });
+      }
+    }
+  } catch (err) {
+    api.logger.warn(`@dispatch: could not apply tier label: ${err}`);
+  }
+
+  // 11. Run pipeline (non-blocking)
+  const agentId = resolveAgentId(api);
+  const pipelineCtx: PipelineContext = {
+    api,
+    linearApi,
+    agentSessionId: agentSessionId ?? `dispatch-${identifier}-${Date.now()}`,
+    agentId,
+    issue: {
+      id: issue.id,
+      identifier,
+      title: enrichedIssue.title ?? "(untitled)",
+      description: enrichedIssue.description,
+    },
+    worktreePath: worktree.path,
+    codexBranch: worktree.branch,
+    tier: assessment.tier,
+    model: assessment.model,
+  };
+
+  activeRuns.add(issue.id);
+
+  // Update status to running
+  await updateDispatchStatus(identifier, "running", statePath);
+
+  runFullPipeline(pipelineCtx)
+    .then(async () => {
+      await completeDispatch(identifier, {
+        tier: assessment.tier,
+        status: "done",
+        completedAt: new Date().toISOString(),
+      }, statePath);
+      api.logger.info(`@dispatch: pipeline completed for ${identifier}`);
+    })
+    .catch(async (err) => {
+      api.logger.error(`@dispatch: pipeline failed for ${identifier}: ${err}`);
+      await updateDispatchStatus(identifier, "failed", statePath);
+    })
+    .finally(() => {
+      activeRuns.delete(issue.id);
+      clearActiveSession(issue.id);
+    });
 }

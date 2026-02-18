@@ -2,6 +2,12 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { LinearAgentApi, ActivityContent } from "./linear-api.js";
 import { runAgent } from "./agent.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
+import type { Tier } from "./dispatch-state.js";
+import { runCodex } from "./codex-tool.js";
+import { runClaude } from "./claude-tool.js";
+import { runGemini } from "./gemini-tool.js";
+import { resolveCodingBackend, loadCodingConfig, type CodingBackend } from "./code-tool.js";
+import type { CliResult } from "./cli-shared.js";
 
 export interface PipelineContext {
   api: OpenClawPluginApi;
@@ -19,28 +25,74 @@ export interface PipelineContext {
   worktreePath?: string | null;
   /** Codex branch name, e.g. codex/UAT-123 */
   codexBranch?: string | null;
+  /** Complexity tier selected by tier assessment */
+  tier?: Tier;
+  /** Tier model ID — for display/tracking only, NOT passed to coding CLI */
+  model?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function emit(ctx: PipelineContext, content: ActivityContent): Promise<void> {
   return ctx.linearApi.emitActivity(ctx.agentSessionId, content).catch((err) => {
-    ctx.api.logger.error(`Failed to emit activity: ${err}`);
+    ctx.api.logger.error(`[${ctx.issue.identifier}] emit failed: ${err}`);
   });
 }
 
-function toolContext(ctx: PipelineContext): string {
-  return [
-    `\n## Tool Context`,
-    `When calling \`code_run\`, you MUST pass these parameters:`,
-    `- \`agentSessionId\`: \`"${ctx.agentSessionId}"\``,
-    `- \`issueIdentifier\`: \`"${ctx.issue.identifier}"\``,
-    `This enables real-time progress streaming to Linear and isolated worktree creation.`,
-  ].join("\n");
+/** Resolve the agent's model string from config for logging/display. */
+function resolveAgentModel(api: OpenClawPluginApi, agentId: string): string {
+  try {
+    const config = (api as any).runtime?.config?.getCachedConfig?.() ?? {};
+    const agents = config?.agents?.list as Array<Record<string, any>> | undefined;
+    const entry = agents?.find((a) => a.id === agentId);
+    const modelRef: string =
+      entry?.model?.primary ??
+      config?.agents?.defaults?.model?.primary ??
+      "unknown";
+    // Strip provider prefix for display: "openrouter/moonshotai/kimi-k2.5" → "kimi-k2.5"
+    const parts = modelRef.split("/");
+    return parts.length > 1 ? parts.slice(1).join("/") : modelRef;
+  } catch {
+    return "unknown";
+  }
 }
 
-// ── Stage 1: Planner ───────────────────────────────────────────────
+function elapsed(startMs: number): string {
+  const sec = ((Date.now() - startMs) / 1000).toFixed(1);
+  return `${sec}s`;
+}
+
+function toolContext(ctx: PipelineContext): string {
+  const lines = [
+    `\n## code_run Tool`,
+    `When calling \`code_run\`, pass these parameters:`,
+  ];
+  lines.push(`- \`prompt\`: describe what to implement (be specific — file paths, function names, expected behavior)`);
+  if (ctx.worktreePath) {
+    lines.push(`- \`workingDir\`: \`"${ctx.worktreePath}"\``);
+  }
+  // Don't suggest model override — each coding CLI uses its own configured model
+  lines.push(`Progress streams to Linear automatically. The worktree is an isolated git branch for this issue.`);
+  return lines.join("\n");
+}
+
+const TAG = (ctx: PipelineContext) => `Pipeline [${ctx.issue.identifier}]`;
+
+// ---------------------------------------------------------------------------
+// Stage 1: Planner
+// ---------------------------------------------------------------------------
 
 export async function runPlannerStage(ctx: PipelineContext): Promise<string | null> {
-  await emit(ctx, { type: "thought", body: `Analyzing issue ${ctx.issue.identifier}...` });
+  const t0 = Date.now();
+  const agentModel = resolveAgentModel(ctx.api, ctx.agentId);
+
+  ctx.api.logger.info(`${TAG(ctx)} stage 1/3: planner starting (agent=${ctx.agentId}, model=${agentModel})`);
+  await emit(ctx, {
+    type: "thought",
+    body: `[1/3 Plan] Analyzing ${ctx.issue.identifier} with ${ctx.agentId} (${agentModel})...`,
+  });
 
   const issueDetails = await ctx.linearApi.getIssueDetails(ctx.issue.id).catch(() => null);
 
@@ -73,98 +125,236 @@ IMPORTANT: Do NOT call code_run or any coding tools. Your job is ONLY to analyze
 
 Output ONLY the plan, nothing else.`;
 
-  await emit(ctx, { type: "action", action: "Planning", parameter: ctx.issue.identifier });
+  await emit(ctx, {
+    type: "action",
+    action: "Planning",
+    parameter: `${ctx.issue.identifier} — agent: ${ctx.agentId} (${agentModel})`,
+  });
+
+  const sessionId = `linear-plan-${ctx.agentSessionId}`;
+  ctx.api.logger.info(`${TAG(ctx)} planner: spawning agent session=${sessionId}`);
 
   const result = await runAgent({
     api: ctx.api,
     agentId: ctx.agentId,
-    sessionId: `linear-plan-${ctx.agentSessionId}`,
+    sessionId,
     message,
     timeoutMs: 5 * 60_000,
-
   });
 
   if (!result.success) {
-    await emit(ctx, { type: "error", body: `Planning failed: ${result.output.slice(0, 500)}` });
+    ctx.api.logger.error(`${TAG(ctx)} planner failed after ${elapsed(t0)}: ${result.output.slice(0, 300)}`);
+    await emit(ctx, {
+      type: "error",
+      body: `[1/3 Plan] Failed after ${elapsed(t0)}: ${result.output.slice(0, 400)}`,
+    });
     return null;
   }
 
   const plan = result.output;
+  ctx.api.logger.info(`${TAG(ctx)} planner completed in ${elapsed(t0)} (${plan.length} chars)`);
 
   // Post plan as a Linear comment
   await ctx.linearApi.createComment(
     ctx.issue.id,
-    `## Implementation Plan\n\n${plan}\n\n---\n*Reply to this comment to approve the plan and begin implementation.*`,
+    `## Implementation Plan\n\n${plan}\n\n---\n*Proceeding to implementation...*`,
   );
 
   await emit(ctx, {
-    type: "elicitation",
-    body: "I've posted an implementation plan as a comment. Please review and reply to approve.",
+    type: "action",
+    action: "Plan complete",
+    parameter: `${ctx.issue.identifier} — ${elapsed(t0)}, moving to implementation`,
   });
 
   return plan;
 }
 
-// ── Stage 2: Implementor ──────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Stage 2: Implementor
+// ---------------------------------------------------------------------------
+//
+// Deterministic: pipeline CODE calls the coding CLI directly.
+// The agent model only evaluates results between runs.
+
+const BACKEND_RUNNERS: Record<
+  CodingBackend,
+  (api: OpenClawPluginApi, params: any, pluginConfig?: Record<string, unknown>) => Promise<CliResult>
+> = {
+  codex: runCodex,
+  claude: runClaude,
+  gemini: runGemini,
+};
 
 export async function runImplementorStage(
   ctx: PipelineContext,
   plan: string,
 ): Promise<string | null> {
-  await emit(ctx, { type: "thought", body: "Plan approved. Starting implementation..." });
+  const t0 = Date.now();
+  const agentModel = resolveAgentModel(ctx.api, ctx.agentId);
+  const pluginConfig = (ctx.api as any).pluginConfig as Record<string, unknown> | undefined;
 
-  const message = `You are an implementor agent. Execute this plan for issue ${ctx.issue.identifier}.
+  // Resolve coding backend from config (coding-tools.json)
+  const codingConfig = loadCodingConfig();
+  const backend = resolveCodingBackend(codingConfig);
+  const runner = BACKEND_RUNNERS[backend];
+  const backendName = backend.charAt(0).toUpperCase() + backend.slice(1);
 
-## Issue: ${ctx.issue.identifier} — ${ctx.issue.title}
+  ctx.api.logger.info(
+    `${TAG(ctx)} stage 2/3: implementor starting ` +
+    `(coding_cli=${backendName}, tier=${ctx.tier ?? "unknown"}, ` +
+    `worktree=${ctx.worktreePath ?? "default"}, ` +
+    `eval_agent=${ctx.agentId}, eval_model=${agentModel})`,
+  );
 
-## Approved Plan:
-${plan}
-
-## Instructions
-1. Follow the plan step by step
-2. Use \`code_run\` to write code, create files, run tests, and refactor — it works in an isolated git worktree
-3. Use \`spawn_agent\` / \`ask_agent\` to delegate to other crew agents if needed
-4. Create commits for each logical change
-5. If the plan involves creating a PR, do so
-6. Report what you did, any files changed, and the worktree/branch path
-${toolContext(ctx)}
-
-Be thorough but stay within scope of the plan.`;
-
-  await emit(ctx, { type: "action", action: "Calling coding provider", parameter: "Codex" });
-
-  const result = await runAgent({
-    api: ctx.api,
-    agentId: ctx.agentId,
-    sessionId: `linear-impl-${ctx.agentSessionId}`,
-    message,
-    timeoutMs: 10 * 60_000,
-
+  await emit(ctx, {
+    type: "thought",
+    body: `[2/3 Implement] Starting ${backendName} CLI → ${ctx.worktreePath ?? "default workspace"}`,
   });
 
-  if (!result.success) {
-    await emit(ctx, { type: "error", body: `Implementation failed: ${result.output.slice(0, 500)}` });
+  // Build the implementation prompt for the coding CLI
+  const codePrompt = [
+    `Implement the following plan for issue ${ctx.issue.identifier} — ${ctx.issue.title}.`,
+    ``,
+    `## Plan`,
+    plan,
+    ``,
+    `## Instructions`,
+    `- Follow the plan step by step`,
+    `- Create commits for each logical change`,
+    `- Run tests if the project has them`,
+    `- Stay within scope of the plan`,
+  ].join("\n");
+
+  await emit(ctx, {
+    type: "action",
+    action: `Running ${backendName}`,
+    parameter: `${ctx.tier ?? "unknown"} tier — worktree: ${ctx.worktreePath ?? "default"}`,
+  });
+
+  // Call the coding CLI directly — deterministic, not LLM choice.
+  // NOTE: Do NOT pass ctx.model here. The tier model (e.g. anthropic/claude-sonnet-4-6)
+  // is for tracking/display only. Each coding CLI uses its own configured model.
+  ctx.api.logger.info(`${TAG(ctx)} implementor: invoking ${backendName} CLI (no model override — CLI uses its own config)`);
+  const cliStart = Date.now();
+
+  const codeResult = await runner(ctx.api, {
+    prompt: codePrompt,
+    workingDir: ctx.worktreePath ?? undefined,
+    timeoutMs: 10 * 60_000,
+  }, pluginConfig);
+
+  const cliElapsed = elapsed(cliStart);
+
+  if (!codeResult.success) {
+    ctx.api.logger.warn(
+      `${TAG(ctx)} implementor: ${backendName} CLI failed after ${cliElapsed} — ` +
+      `error: ${codeResult.error ?? "unknown"}, output: ${codeResult.output.slice(0, 300)}`,
+    );
+    await emit(ctx, {
+      type: "error",
+      body: `[2/3 Implement] ${backendName} failed after ${cliElapsed}: ${(codeResult.error ?? codeResult.output).slice(0, 400)}`,
+    });
+
+    // Ask the agent to evaluate the failure
+    ctx.api.logger.info(`${TAG(ctx)} implementor: spawning ${ctx.agentId} (${agentModel}) to evaluate failure`);
+    await emit(ctx, {
+      type: "action",
+      action: "Evaluating failure",
+      parameter: `${ctx.agentId} (${agentModel}) analyzing ${backendName} error`,
+    });
+
+    const evalResult = await runAgent({
+      api: ctx.api,
+      agentId: ctx.agentId,
+      sessionId: `linear-impl-eval-${ctx.agentSessionId}`,
+      message: `${backendName} failed to implement the plan for ${ctx.issue.identifier}.\n\n## Plan\n${plan}\n\n## ${backendName} Output\n${codeResult.output.slice(0, 3000)}\n\n## Error\n${codeResult.error ?? "unknown"}\n\nAnalyze the failure. Summarize what went wrong and suggest next steps. Be concise.`,
+      timeoutMs: 2 * 60_000,
+    });
+
+    const failureSummary = evalResult.success
+      ? evalResult.output
+      : `Implementation failed and evaluation also failed: ${codeResult.output.slice(0, 500)}`;
+
+    await ctx.linearApi.createComment(
+      ctx.issue.id,
+      `## Implementation Failed\n\n**Backend:** ${backendName} (ran for ${cliElapsed})\n**Tier:** ${ctx.tier ?? "unknown"}\n\n${failureSummary}`,
+    );
+
     return null;
   }
 
-  // Try to extract worktree info from agent output (Codex results include it)
-  const worktreeMatch = result.output.match(/worktreePath["\s:]+([/\w.-]+)/);
-  const branchMatch = result.output.match(/branch["\s:]+([/\w.-]+)/);
-  if (worktreeMatch) ctx.worktreePath = worktreeMatch[1];
-  if (branchMatch) ctx.codexBranch = branchMatch[1];
+  ctx.api.logger.info(`${TAG(ctx)} implementor: ${backendName} CLI completed in ${cliElapsed} (${codeResult.output.length} chars output)`);
 
-  await emit(ctx, { type: "action", action: "Implementation complete", parameter: ctx.issue.identifier });
-  return result.output;
+  // Ask the agent to evaluate the result
+  const evalMessage = [
+    `${backendName} completed implementation for ${ctx.issue.identifier}. Evaluate the result.`,
+    ``,
+    `## Original Plan`,
+    plan,
+    ``,
+    `## ${backendName} Output`,
+    codeResult.output.slice(0, 5000),
+    ``,
+    `## Worktree`,
+    `Path: ${ctx.worktreePath ?? "default"}`,
+    `Branch: ${ctx.codexBranch ?? "unknown"}`,
+    ``,
+    `Summarize what was implemented, any issues found, and whether the plan was fully executed. Be concise.`,
+  ].join("\n");
+
+  ctx.api.logger.info(`${TAG(ctx)} implementor: spawning ${ctx.agentId} (${agentModel}) to evaluate results`);
+  await emit(ctx, {
+    type: "action",
+    action: "Evaluating results",
+    parameter: `${ctx.agentId} (${agentModel}) reviewing ${backendName} output`,
+  });
+
+  const evalStart = Date.now();
+  const evalResult = await runAgent({
+    api: ctx.api,
+    agentId: ctx.agentId,
+    sessionId: `linear-impl-eval-${ctx.agentSessionId}`,
+    message: evalMessage,
+    timeoutMs: 3 * 60_000,
+  });
+
+  const summary = evalResult.success
+    ? evalResult.output
+    : `Implementation completed but evaluation failed. ${backendName} output:\n${codeResult.output.slice(0, 2000)}`;
+
+  ctx.api.logger.info(
+    `${TAG(ctx)} implementor: evaluation ${evalResult.success ? "succeeded" : "failed"} in ${elapsed(evalStart)}, ` +
+    `total stage time: ${elapsed(t0)}`,
+  );
+
+  await emit(ctx, {
+    type: "action",
+    action: "Implementation complete",
+    parameter: `${backendName} ${cliElapsed} + eval ${elapsed(evalStart)} = ${elapsed(t0)} total`,
+  });
+
+  return summary;
 }
 
-// ── Stage 3: Auditor ──────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Stage 3: Auditor
+// ---------------------------------------------------------------------------
 
 export async function runAuditorStage(
   ctx: PipelineContext,
   plan: string,
   implResult: string,
 ): Promise<void> {
-  await emit(ctx, { type: "thought", body: "Auditing implementation against the plan..." });
+  const t0 = Date.now();
+  const agentModel = resolveAgentModel(ctx.api, ctx.agentId);
+
+  ctx.api.logger.info(
+    `${TAG(ctx)} stage 3/3: auditor starting (agent=${ctx.agentId}, model=${agentModel})`,
+  );
+  await emit(ctx, {
+    type: "thought",
+    body: `[3/3 Audit] Reviewing implementation with ${ctx.agentId} (${agentModel})...`,
+  });
 
   const worktreeInfo = ctx.worktreePath
     ? `\n## Worktree\nCode changes are at: \`${ctx.worktreePath}\` (branch: \`${ctx.codexBranch ?? "unknown"}\`)\n`
@@ -190,18 +380,30 @@ ${toolContext(ctx)}
 
 Output ONLY the audit summary.`;
 
-  await emit(ctx, { type: "action", action: "Auditing", parameter: ctx.issue.identifier });
+  const sessionId = `linear-audit-${ctx.agentSessionId}`;
+  ctx.api.logger.info(`${TAG(ctx)} auditor: spawning agent session=${sessionId}`);
+
+  await emit(ctx, {
+    type: "action",
+    action: "Auditing",
+    parameter: `${ctx.issue.identifier} — agent: ${ctx.agentId} (${agentModel})`,
+  });
 
   const result = await runAgent({
     api: ctx.api,
     agentId: ctx.agentId,
-    sessionId: `linear-audit-${ctx.agentSessionId}`,
+    sessionId,
     message,
     timeoutMs: 5 * 60_000,
-
   });
 
-  const auditSummary = result.success ? result.output : `Audit failed: ${result.output.slice(0, 500)}`;
+  const auditSummary = result.success
+    ? result.output
+    : `Audit failed: ${result.output.slice(0, 500)}`;
+
+  ctx.api.logger.info(
+    `${TAG(ctx)} auditor: ${result.success ? "completed" : "failed"} in ${elapsed(t0)} (${auditSummary.length} chars)`,
+  );
 
   await ctx.linearApi.createComment(
     ctx.issue.id,
@@ -210,13 +412,35 @@ Output ONLY the audit summary.`;
 
   await emit(ctx, {
     type: "response",
-    body: `Completed work on ${ctx.issue.identifier}. Plan, implementation, and audit posted as comments.`,
+    body: `[3/3 Audit] ${result.success ? "Complete" : "Failed"} (${elapsed(t0)}). ` +
+      `All stages done for ${ctx.issue.identifier}. Plan, implementation, and audit posted as comments.`,
   });
 }
 
-// ── Full Pipeline ─────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Full Pipeline
+// ---------------------------------------------------------------------------
+//
+// Runs all three stages sequentially: plan → implement → audit.
+// Assignment is the trigger AND the approval — no pause between stages.
+// Each stage's result feeds into the next. If any stage fails, the
+// pipeline stops and reports the error.
 
 export async function runFullPipeline(ctx: PipelineContext): Promise<void> {
+  const t0 = Date.now();
+  const agentModel = resolveAgentModel(ctx.api, ctx.agentId);
+  const codingConfig = loadCodingConfig();
+  const codingBackend = resolveCodingBackend(codingConfig);
+
+  ctx.api.logger.info(
+    `${TAG(ctx)} === PIPELINE START === ` +
+    `agent=${ctx.agentId}, agent_model=${agentModel}, ` +
+    `coding_cli=${codingBackend}, tier=${ctx.tier ?? "unknown"}, ` +
+    `worktree=${ctx.worktreePath ?? "none"}, ` +
+    `branch=${ctx.codexBranch ?? "none"}, ` +
+    `session=${ctx.agentSessionId}`,
+  );
+
   // Register active session so tools (code_run) can resolve it
   setActiveSession({
     agentSessionId: ctx.agentSessionId,
@@ -226,44 +450,49 @@ export async function runFullPipeline(ctx: PipelineContext): Promise<void> {
     startedAt: Date.now(),
   });
 
+  await emit(ctx, {
+    type: "thought",
+    body: `Pipeline started for ${ctx.issue.identifier} — ` +
+      `agent: ${ctx.agentId} (${agentModel}), ` +
+      `coding: ${codingBackend}, ` +
+      `tier: ${ctx.tier ?? "unknown"}`,
+  });
+
   try {
     // Stage 1: Plan
     const plan = await runPlannerStage(ctx);
     if (!plan) {
-      clearActiveSession(ctx.issue.id);
+      ctx.api.logger.error(`${TAG(ctx)} planner produced no plan — aborting after ${elapsed(t0)}`);
+      await emit(ctx, {
+        type: "error",
+        body: `Pipeline aborted — planning stage failed after ${elapsed(t0)}. No plan produced.`,
+      });
       return;
     }
 
-    // Pipeline pauses here — user must reply to approve.
-    // The "prompted" / "created" webhook will call resumePipeline().
-    // Active session stays registered until resume completes.
-  } catch (err) {
-    clearActiveSession(ctx.issue.id);
-    ctx.api.logger.error(`Pipeline error: ${err}`);
-    await emit(ctx, { type: "error", body: `Pipeline failed: ${String(err).slice(0, 500)}` });
-  }
-}
-
-export async function resumePipeline(ctx: PipelineContext, plan: string): Promise<void> {
-  // Register (or update) active session for tool resolution
-  setActiveSession({
-    agentSessionId: ctx.agentSessionId,
-    issueIdentifier: ctx.issue.identifier,
-    issueId: ctx.issue.id,
-    agentId: ctx.agentId,
-    startedAt: Date.now(),
-  });
-
-  try {
     // Stage 2: Implement
     const implResult = await runImplementorStage(ctx, plan);
-    if (!implResult) return;
+    if (!implResult) {
+      ctx.api.logger.error(`${TAG(ctx)} implementor failed — aborting after ${elapsed(t0)}`);
+      await emit(ctx, {
+        type: "error",
+        body: `Pipeline aborted — implementation stage failed after ${elapsed(t0)}.`,
+      });
+      return;
+    }
 
     // Stage 3: Audit
     await runAuditorStage(ctx, plan, implResult);
+
+    ctx.api.logger.info(
+      `${TAG(ctx)} === PIPELINE COMPLETE === total time: ${elapsed(t0)}`,
+    );
   } catch (err) {
-    ctx.api.logger.error(`Pipeline error: ${err}`);
-    await emit(ctx, { type: "error", body: `Pipeline failed: ${String(err).slice(0, 500)}` });
+    ctx.api.logger.error(`${TAG(ctx)} === PIPELINE ERROR === after ${elapsed(t0)}: ${err}`);
+    await emit(ctx, {
+      type: "error",
+      body: `Pipeline crashed after ${elapsed(t0)}: ${String(err).slice(0, 400)}`,
+    });
   } finally {
     clearActiveSession(ctx.issue.id);
   }
