@@ -61,6 +61,149 @@ function createApi(): OpenClawPluginApi {
   } as unknown as OpenClawPluginApi;
 }
 
+describe("runAgent subprocess", () => {
+  it("extracts text from JSON payloads", async () => {
+    const api = createApi();
+    (api.runtime.system as any).runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify({ result: { payloads: [{ text: "hello" }, { text: "world" }] } }),
+      stderr: "",
+    });
+
+    const result = await runAgent({
+      api,
+      agentId: "test-agent",
+      sessionId: "session-1",
+      message: "do something",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("hello");
+    expect(result.output).toContain("world");
+  });
+
+  it("uses raw stdout when JSON parsing fails", async () => {
+    const api = createApi();
+    (api.runtime.system as any).runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: "plain text output",
+      stderr: "",
+    });
+
+    const result = await runAgent({
+      api,
+      agentId: "test-agent",
+      sessionId: "session-1",
+      message: "do something",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toBe("plain text output");
+  });
+
+  it("uses stderr when command fails with no stdout", async () => {
+    const api = createApi();
+    (api.runtime.system as any).runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 1,
+      stdout: "",
+      stderr: "error from stderr",
+    });
+
+    const result = await runAgent({
+      api,
+      agentId: "test-agent",
+      sessionId: "session-1",
+      message: "do something",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("error from stderr");
+  });
+
+  it("includes agentId in command arguments", async () => {
+    const api = createApi();
+    const runCmd = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: "ok",
+      stderr: "",
+    });
+    (api.runtime.system as any).runCommandWithTimeout = runCmd;
+
+    await runAgent({
+      api,
+      agentId: "my-agent",
+      sessionId: "session-1",
+      message: "test",
+    });
+
+    const args = runCmd.mock.calls[0][0];
+    expect(args).toContain("my-agent");
+    expect(args).toContain("--agent");
+  });
+
+  it("passes timeout in seconds to subprocess", async () => {
+    const api = createApi();
+    const runCmd = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: "ok",
+      stderr: "",
+    });
+    (api.runtime.system as any).runCommandWithTimeout = runCmd;
+
+    await runAgent({
+      api,
+      agentId: "test",
+      sessionId: "session-1",
+      message: "test",
+      timeoutMs: 60_000,
+    });
+
+    const args: string[] = runCmd.mock.calls[0][0];
+    const timeoutIdx = args.indexOf("--timeout");
+    expect(timeoutIdx).toBeGreaterThan(-1);
+    expect(args[timeoutIdx + 1]).toBe("60");
+  });
+
+  it("handles empty payloads array", async () => {
+    const api = createApi();
+    (api.runtime.system as any).runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify({ result: { payloads: [] } }),
+      stderr: "",
+    });
+
+    const result = await runAgent({
+      api,
+      agentId: "test",
+      sessionId: "s1",
+      message: "test",
+    });
+
+    expect(result.success).toBe(true);
+    // Falls back to raw stdout when no payload text
+    expect(result.output).toBeTruthy();
+  });
+
+  it("handles null payloads text", async () => {
+    const api = createApi();
+    (api.runtime.system as any).runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify({ result: { payloads: [{ text: null }, { text: "real" }] } }),
+      stderr: "",
+    });
+
+    const result = await runAgent({
+      api,
+      agentId: "test",
+      sessionId: "s1",
+      message: "test",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("real");
+  });
+});
+
 describe("runAgent retry wrapper", () => {
   it("returns success on first attempt when no watchdog kill", async () => {
     const api = createApi();

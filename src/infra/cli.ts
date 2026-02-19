@@ -8,7 +8,8 @@ import { exec } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveLinearToken, AUTH_PROFILES_PATH, LINEAR_GRAPHQL_URL } from "../api/linear-api.js";
+import { resolveLinearToken, LinearAgentApi, AUTH_PROFILES_PATH, LINEAR_GRAPHQL_URL } from "../api/linear-api.js";
+import { validateRepoPath } from "./multi-repo.js";
 import { LINEAR_OAUTH_AUTH_URL, LINEAR_OAUTH_TOKEN_URL, LINEAR_AGENT_SCOPES } from "../api/auth.js";
 import { listWorktrees } from "./codex-worktree.js";
 import { loadPrompts, clearPromptCache } from "../pipeline/pipeline.js";
@@ -248,6 +249,25 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
       }
 
       console.log(`\nTo remove one: openclaw openclaw-linear worktrees --prune <path>\n`);
+    });
+
+  // --- openclaw openclaw-linear repos ---
+  const repos = linear
+    .command("repos")
+    .description("Validate multi-repo config and sync labels to Linear");
+
+  repos
+    .command("check")
+    .description("Validate repo paths and show what labels would be created (dry run)")
+    .action(async () => {
+      await reposAction(api, { dryRun: true });
+    });
+
+  repos
+    .command("sync")
+    .description("Create missing repo: labels in Linear from your repos config")
+    .action(async () => {
+      await reposAction(api, { dryRun: false });
     });
 
   // --- openclaw openclaw-linear prompts ---
@@ -624,4 +644,159 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
         process.exitCode = 1;
       }
     });
+}
+
+// ---------------------------------------------------------------------------
+// repos sync / check helper
+// ---------------------------------------------------------------------------
+
+const REPO_LABEL_COLOR = "#5e6ad2"; // Linear indigo
+
+async function reposAction(
+  api: OpenClawPluginApi,
+  opts: { dryRun: boolean },
+): Promise<void> {
+  const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+  const reposMap = (pluginConfig?.repos as Record<string, string> | undefined) ?? {};
+  const repoNames = Object.keys(reposMap);
+
+  const mode = opts.dryRun ? "Repos Check" : "Repos Sync";
+  console.log(`\n${mode}`);
+  console.log("─".repeat(40));
+
+  // 1. Validate config
+  if (repoNames.length === 0) {
+    console.log(`\n  No "repos" configured in plugin config.`);
+    console.log(`  Add a repos map to openclaw.json → plugins.entries.openclaw-linear.config:`);
+    console.log(`\n    "repos": {`);
+    console.log(`      "api": "/home/claw/repos/api",`);
+    console.log(`      "frontend": "/home/claw/repos/frontend"`);
+    console.log(`    }\n`);
+    return;
+  }
+
+  // 2. Validate each repo path
+  console.log("\n  Repos from config:");
+  const warnings: string[] = [];
+
+  for (const name of repoNames) {
+    const repoPath = reposMap[name];
+    const status = validateRepoPath(repoPath);
+    const pad = name.padEnd(16);
+
+    if (!status.exists) {
+      console.log(`  \u2717 ${pad} ${repoPath} (path not found)`);
+      warnings.push(`"${name}" at ${repoPath} does not exist`);
+    } else if (!status.isGitRepo) {
+      console.log(`  \u2717 ${pad} ${repoPath} (not a git repo)`);
+      warnings.push(`"${name}" at ${repoPath} is not a git repository`);
+    } else if (status.isSubmodule) {
+      console.log(`  \u26a0 ${pad} ${repoPath} (submodule)`);
+      warnings.push(`"${name}" at ${repoPath} is a git submodule`);
+    } else {
+      console.log(`  \u2714 ${pad} ${repoPath} (git repo)`);
+    }
+  }
+
+  // 3. Connect to Linear
+  const tokenInfo = resolveLinearToken(pluginConfig);
+  if (!tokenInfo.accessToken) {
+    console.log(`\n  No Linear token found. Run "openclaw openclaw-linear auth" first.\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+    refreshToken: tokenInfo.refreshToken,
+    expiresAt: tokenInfo.expiresAt,
+    clientId: pluginConfig?.clientId as string | undefined,
+    clientSecret: pluginConfig?.clientSecret as string | undefined,
+  });
+
+  // 4. Get teams
+  let teams: Array<{ id: string; name: string; key: string }>;
+  try {
+    teams = await linearApi.getTeams();
+  } catch (err) {
+    console.log(`\n  Failed to fetch teams: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (teams.length === 0) {
+    console.log(`\n  No teams found in your Linear workspace.\n`);
+    return;
+  }
+
+  // 5. Sync labels per team
+  let totalCreated = 0;
+  let totalExisted = 0;
+
+  for (const team of teams) {
+    console.log(`\n  Team: ${team.name} (${team.key})`);
+
+    let existingLabels: Array<{ id: string; name: string }>;
+    try {
+      existingLabels = await linearApi.getTeamLabels(team.id);
+    } catch (err) {
+      console.log(`    Failed to fetch labels: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+
+    const existingNames = new Set(existingLabels.map(l => l.name.toLowerCase()));
+
+    for (const name of repoNames) {
+      const labelName = `repo:${name}`;
+
+      if (existingNames.has(labelName.toLowerCase())) {
+        console.log(`  \u2714 ${labelName.padEnd(24)} already exists`);
+        totalExisted++;
+      } else if (opts.dryRun) {
+        console.log(`  + ${labelName.padEnd(24)} would be created`);
+      } else {
+        try {
+          await linearApi.createLabel(team.id, labelName, {
+            color: REPO_LABEL_COLOR,
+            description: `Multi-repo dispatch: ${name}`,
+          });
+          console.log(`  + ${labelName.padEnd(24)} created`);
+          totalCreated++;
+        } catch (err) {
+          console.log(`  \u2717 ${labelName.padEnd(24)} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+  }
+
+  // 6. Summary
+  if (opts.dryRun) {
+    const wouldCreate = repoNames.length * teams.length - totalExisted;
+    console.log(`\n  Dry run: ${wouldCreate} label(s) would be created, ${totalExisted} already exist`);
+  } else {
+    console.log(`\n  Summary: ${totalCreated} created, ${totalExisted} already existed`);
+  }
+
+  // 7. Submodule warnings
+  const submoduleWarnings = warnings.filter(w => w.includes("submodule"));
+  if (submoduleWarnings.length > 0) {
+    console.log(`\n  \u26a0 Submodule warning:`);
+    for (const w of submoduleWarnings) {
+      console.log(`    ${w}`);
+    }
+    console.log(`    Multi-repo dispatch uses "git worktree add" which doesn't work on submodules.`);
+    console.log(`    Options:`);
+    console.log(`    1. Clone the repo as a standalone repo instead`);
+    console.log(`    2. Remove it from "repos" config and use the parent repo as codexBaseRepo`);
+  }
+
+  // Other warnings
+  const otherWarnings = warnings.filter(w => !w.includes("submodule"));
+  if (otherWarnings.length > 0) {
+    console.log(`\n  Warnings:`);
+    for (const w of otherWarnings) {
+      console.log(`    \u26a0 ${w}`);
+    }
+  }
+
+  console.log();
 }

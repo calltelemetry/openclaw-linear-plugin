@@ -172,4 +172,93 @@ describe("assessTier", () => {
     expect(result.model).toBe(TIER_MODELS.junior);
     expect(result.reasoning).toBe("Config tweak");
   });
+
+  it("handles null description gracefully", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: true,
+      output: '{"tier":"junior","reasoning":"Trivial"}',
+    });
+
+    const api = makeApi({ defaultAgentId: "mal" });
+    const result = await assessTier(api, makeIssue({ description: null }));
+
+    expect(result.tier).toBe("junior");
+  });
+
+  it("handles empty labels and no comments", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: true,
+      output: '{"tier":"medior","reasoning":"Standard feature"}',
+    });
+
+    const api = makeApi({ defaultAgentId: "mal" });
+    const result = await assessTier(api, makeIssue({ labels: [], commentCount: undefined }));
+
+    expect(result.tier).toBe("medior");
+  });
+
+  it("falls back to medior on malformed JSON (half JSON)", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: true,
+      output: '{"tier":"seni',
+    });
+
+    const api = makeApi({ defaultAgentId: "mal" });
+    const result = await assessTier(api, makeIssue());
+
+    expect(result.tier).toBe("medior");
+    expect(result.reasoning).toBe("Assessment failed — defaulting to medior");
+  });
+
+  it("provides default reasoning when missing from response", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: true,
+      output: '{"tier":"senior"}',
+    });
+
+    const api = makeApi({ defaultAgentId: "mal" });
+    const result = await assessTier(api, makeIssue());
+
+    expect(result.tier).toBe("senior");
+    expect(result.reasoning).toBe("no reasoning provided");
+  });
+
+  it("extracts JSON from output with success=false but valid JSON", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: false,
+      output: 'Agent exited early but: {"tier":"junior","reasoning":"Simple fix"}',
+    });
+
+    const api = makeApi({ defaultAgentId: "mal" });
+    const result = await assessTier(api, makeIssue());
+
+    expect(result.tier).toBe("junior");
+    expect(result.reasoning).toBe("Simple fix");
+  });
+
+  it("defaults agentId from pluginConfig when not passed", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: true,
+      output: '{"tier":"medior","reasoning":"Normal"}',
+    });
+
+    const api = makeApi({ defaultAgentId: "zoe" });
+    await assessTier(api, makeIssue());
+
+    const callArgs = mockRunAgent.mock.calls[0][0];
+    expect(callArgs.agentId).toBe("zoe");
+  });
+
+  it("uses 30s timeout for assessment", async () => {
+    mockRunAgent.mockResolvedValue({
+      success: true,
+      output: '{"tier":"medior","reasoning":"Normal"}',
+    });
+
+    const api = makeApi({ defaultAgentId: "mal" });
+    await assessTier(api, makeIssue());
+
+    const callArgs = mockRunAgent.mock.calls[0][0];
+    expect(callArgs.timeoutMs).toBe(30_000);
+  });
 });

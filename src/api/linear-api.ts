@@ -375,6 +375,42 @@ export class LinearAgentApi {
     return data.team.labels.nodes;
   }
 
+  async getTeams(): Promise<Array<{ id: string; name: string; key: string }>> {
+    const data = await this.gql<{
+      teams: { nodes: Array<{ id: string; name: string; key: string }> };
+    }>(
+      `query { teams { nodes { id name key } } }`,
+    );
+    return data.teams.nodes;
+  }
+
+  async createLabel(
+    teamId: string,
+    name: string,
+    opts?: { color?: string; description?: string },
+  ): Promise<{ id: string; name: string }> {
+    const input: Record<string, string> = { teamId, name };
+    if (opts?.color) input.color = opts.color;
+    if (opts?.description) input.description = opts.description;
+
+    const data = await this.gql<{
+      issueLabelCreate: { success: boolean; issueLabel: { id: string; name: string } };
+    }>(
+      `mutation CreateLabel($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
+          success
+          issueLabel { id name }
+        }
+      }`,
+      { input },
+    );
+
+    if (!data.issueLabelCreate.success) {
+      throw new Error(`Failed to create label "${name}"`);
+    }
+    return data.issueLabelCreate.issueLabel;
+  }
+
   // ---------------------------------------------------------------------------
   // Planning methods
   // ---------------------------------------------------------------------------

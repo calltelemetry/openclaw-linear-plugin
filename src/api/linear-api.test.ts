@@ -464,6 +464,98 @@ describe("LinearAgentApi", () => {
     });
   });
 
+  describe("getTeams", () => {
+    it("returns parsed team list", async () => {
+      fetchMock.mockResolvedValueOnce(
+        okResponse({
+          teams: {
+            nodes: [
+              { id: "t1", name: "Engineering", key: "ENG" },
+              { id: "t2", name: "Design", key: "DES" },
+            ],
+          },
+        }),
+      );
+
+      const api = new LinearAgentApi(TOKEN);
+      const teams = await api.getTeams();
+      expect(teams).toHaveLength(2);
+      expect(teams[0]).toEqual({ id: "t1", name: "Engineering", key: "ENG" });
+      expect(teams[1]).toEqual({ id: "t2", name: "Design", key: "DES" });
+    });
+
+    it("handles empty teams list", async () => {
+      fetchMock.mockResolvedValueOnce(okResponse({ teams: { nodes: [] } }));
+
+      const api = new LinearAgentApi(TOKEN);
+      const teams = await api.getTeams();
+      expect(teams).toEqual([]);
+    });
+  });
+
+  describe("createLabel", () => {
+    it("sends correct mutation and returns label", async () => {
+      fetchMock.mockResolvedValueOnce(
+        okResponse({
+          issueLabelCreate: {
+            success: true,
+            issueLabel: { id: "label-1", name: "repo:api" },
+          },
+        }),
+      );
+
+      const api = new LinearAgentApi(TOKEN);
+      const label = await api.createLabel("t1", "repo:api", {
+        color: "#5e6ad2",
+        description: "Multi-repo dispatch: api",
+      });
+
+      expect(label).toEqual({ id: "label-1", name: "repo:api" });
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.query).toContain("issueLabelCreate");
+      expect(body.variables.input).toEqual({
+        teamId: "t1",
+        name: "repo:api",
+        color: "#5e6ad2",
+        description: "Multi-repo dispatch: api",
+      });
+    });
+
+    it("throws on API failure", async () => {
+      fetchMock.mockResolvedValueOnce(
+        okResponse({
+          issueLabelCreate: { success: false, issueLabel: null },
+        }),
+      );
+
+      const api = new LinearAgentApi(TOKEN);
+      await expect(
+        api.createLabel("t1", "repo:bad"),
+      ).rejects.toThrow(/Failed to create label/);
+    });
+
+    it("omits optional fields when not provided", async () => {
+      fetchMock.mockResolvedValueOnce(
+        okResponse({
+          issueLabelCreate: {
+            success: true,
+            issueLabel: { id: "label-2", name: "repo:frontend" },
+          },
+        }),
+      );
+
+      const api = new LinearAgentApi(TOKEN);
+      await api.createLabel("t1", "repo:frontend");
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.variables.input).toEqual({
+        teamId: "t1",
+        name: "repo:frontend",
+      });
+    });
+  });
+
   describe("createSessionOnIssue", () => {
     it("returns sessionId on success", async () => {
       fetchMock.mockResolvedValueOnce(

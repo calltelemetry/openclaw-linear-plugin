@@ -582,37 +582,111 @@ openclaw openclaw-linear prompts validate   # Check for errors
 
 ## Multi-Repo
 
-Work across multiple repositories in a single dispatch. The plugin creates parallel worktrees — one per repo — and gives the agent all of them.
+Sometimes a feature touches more than one repo — your API and your frontend, for example. Multi-repo lets the agent work on both at the same time, in separate worktrees.
 
-### How to Enable
+### Step 1: Tell the plugin where your repos live
 
-**Option 1: Issue body marker** (per-issue)
+Add a `repos` map to your plugin config in `openclaw.json`. The **key** is a short name you pick, the **value** is the absolute path to that repo on disk:
 
-Add this anywhere in your issue description:
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-linear": {
+        "config": {
+          "repos": {
+            "api": "/home/claw/repos/api",
+            "frontend": "/home/claw/repos/frontend",
+            "shared": "/home/claw/repos/shared-libs"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Restart the gateway after saving: `systemctl --user restart openclaw-gateway`
+
+### Step 1.5: Sync labels to Linear (optional)
+
+If you plan to use labels (Method B below) to tag issues, run this to create the `repo:xxx` labels automatically:
+
+```bash
+openclaw openclaw-linear repos sync
+```
+
+This reads your `repos` config and creates matching labels (`repo:api`, `repo:frontend`, etc.) in every Linear team. To preview without creating anything:
+
+```bash
+openclaw openclaw-linear repos check
+```
+
+The check command also validates your repo paths — it'll warn you if a path doesn't exist, isn't a git repo, or is a **submodule** (which won't work with multi-repo dispatch).
+
+### Step 2: Tag the issue
+
+When you write an issue in Linear that needs multiple repos, tell the plugin which ones. Pick **one** of these methods:
+
+#### Method A: HTML comment in the issue body (recommended)
+
+Put this line anywhere in the issue description — it's invisible in Linear's UI:
 
 ```
 <!-- repos: api, frontend -->
 ```
 
-**Option 2: Linear labels** (per-issue)
+Full example of what an issue body might look like:
 
-Add labels like `repo:api` and `repo:frontend` to the issue.
+```
+The search endpoint needs to be added to the API, and the frontend
+needs a new search page that calls it.
 
-**Option 3: Config default** (all issues)
+<!-- repos: api, frontend -->
 
-```json
-{
-  "repos": {
-    "api": "/home/claw/api",
-    "frontend": "/home/claw/frontend",
-    "shared": "/home/claw/shared-libs"
-  }
-}
+Acceptance criteria:
+- GET /api/search?q=term returns results
+- /search page renders results with pagination
 ```
 
-The repo names in issue markers and labels must match the keys in your `repos` config.
+#### Method B: Linear labels
 
-If no multi-repo markers are found, the plugin falls back to a single worktree from `codexBaseRepo`.
+Create labels in Linear called `repo:api` and `repo:frontend`, then add them to the issue. The part after `repo:` must match the key in your config.
+
+#### Method C: Do nothing (config default)
+
+If you don't tag the issue at all, the plugin uses your `codexBaseRepo` setting (a single repo). This is how it worked before multi-repo existed — nothing changes for single-repo issues.
+
+### What happens when you dispatch
+
+When the agent picks up a multi-repo issue, the dispatch comment tells you:
+
+> **Dispatched** as **senior** (anthropic/claude-opus-4-6)
+>
+> Worktrees:
+> - `api` → `/home/claw/worktrees/ENG-100/api`
+> - `frontend` → `/home/claw/worktrees/ENG-100/frontend`
+>
+> Branch: `codex/ENG-100`
+
+The agent gets access to all the worktrees and can edit files across repos in one session. Each repo gets its own git branch.
+
+### Priority order
+
+If an issue has both a body marker and labels, the body marker wins. Full order:
+
+1. `<!-- repos: ... -->` in the issue body
+2. `repo:xxx` labels on the issue
+3. `codexBaseRepo` from config (single repo fallback)
+
+### Common mistakes
+
+| Problem | Fix |
+|---|---|
+| Agent only sees one repo | The name in `<!-- repos: api -->` must exactly match a key in your `repos` config. Check spelling. |
+| "Could not create worktree" error | The path in your `repos` config doesn't exist, or it's not a git repo. Run `ls /home/claw/repos/api/.git` to check. |
+| Comment marker not detected | Must be `<!-- repos: name1, name2 -->` with the exact format. No extra spaces around `<!--` or `-->`. |
+| Labels not picked up | Labels must be formatted `repo:name` (lowercase, no spaces). The `name` part must match a `repos` config key. |
 
 ---
 
@@ -711,7 +785,7 @@ Every warning and error includes a `→` line telling you what to do. Run `docto
 
 ### Unit tests
 
-320 tests covering the full pipeline — triage, dispatch, audit, planning, notifications, and infrastructure:
+422 tests covering the full pipeline — triage, dispatch, audit, planning, notifications, and infrastructure:
 
 ```bash
 cd ~/claw-extensions/linear
@@ -821,6 +895,10 @@ openclaw openclaw-linear status                    # Check connection
 # Worktrees
 openclaw openclaw-linear worktrees                 # List active worktrees
 openclaw openclaw-linear worktrees --prune <path>  # Remove a worktree
+
+# Multi-repo
+openclaw openclaw-linear repos check               # Validate paths, preview labels
+openclaw openclaw-linear repos sync                # Create missing repo: labels in Linear
 
 # Prompts
 openclaw openclaw-linear prompts show              # View current prompts

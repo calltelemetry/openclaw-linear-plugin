@@ -7,6 +7,7 @@
  * 3. Config default: Falls back to single codexBaseRepo
  */
 
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 
 export interface RepoConfig {
@@ -82,4 +83,32 @@ function resolveRepoPath(name: string, pluginConfig?: Record<string, unknown>): 
 
 export function isMultiRepo(resolution: RepoResolution): boolean {
   return resolution.repos.length > 1;
+}
+
+/**
+ * Validate a repo path: exists, is a git repo, and whether it's a submodule.
+ * Submodules have a `.git` *file* (not directory) that points to the parent's
+ * `.git/modules/` — `git worktree add` won't work on them.
+ */
+export function validateRepoPath(repoPath: string): {
+  exists: boolean;
+  isGitRepo: boolean;
+  isSubmodule: boolean;
+} {
+  if (!existsSync(repoPath)) {
+    return { exists: false, isGitRepo: false, isSubmodule: false };
+  }
+
+  const gitPath = path.join(repoPath, ".git");
+  if (!existsSync(gitPath)) {
+    return { exists: true, isGitRepo: false, isSubmodule: false };
+  }
+
+  const stat = statSync(gitPath);
+  if (stat.isFile()) {
+    // .git is a file → submodule (points to parent's .git/modules/)
+    return { exists: true, isGitRepo: true, isSubmodule: true };
+  }
+
+  return { exists: true, isGitRepo: true, isSubmodule: false };
 }
