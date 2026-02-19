@@ -1,6 +1,8 @@
 {
   "codingTool": "codex",
-  "agentCodingTools": {},
+  "agentCodingTools": {
+    "inara": "claude"
+  },
   "backends": {
     "claude": {
       "aliases": ["claude", "claude code", "anthropic"]
