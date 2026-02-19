@@ -305,6 +305,82 @@ journalctl --user -u openclaw-gateway -n 50 --no-pager
 
 ---
 
+## Multi-Repo Dispatch
+
+```bash
+# Check if multi-repo is being detected
+journalctl --user -u openclaw-gateway --since "10 min ago" | grep -i "multi-repo\|resolveRepos"
+
+# Verify repos config
+cat ~/.openclaw/openclaw.json | jq '.plugins.entries["openclaw-linear"].config.repos'
+
+# Check worktree parent directory
+ls -la ~/.openclaw/worktrees/
+```
+
+Common issues:
+- Issue body markers not detected → must be `<!-- repos: name1, name2 -->` (HTML comment) or `[repos: name1, name2]`
+- Labels not matching → labels must be exactly `repo:name` (lowercase, no spaces)
+- Repo path doesn't exist → check that all paths in `repos` config point to valid git repos
+- Worktree creation fails → check git permissions and that the base branch exists
+
+---
+
+## Dispatch Management
+
+```bash
+# List active dispatches via slash command
+# (In an agent session, type: /dispatch list)
+
+# Check dispatch state directly
+cat ~/.openclaw/linear-dispatch-state.json | jq '.dispatches.active | keys'
+
+# Retry a stuck dispatch via gateway RPC
+# (dispatch.retry method via gateway API)
+
+# Check dispatch history/memory files
+ls ~/.openclaw/workspace/memory/dispatch-*.md
+```
+
+Common issues:
+- `/dispatch` command not found → restart gateway, check plugin loaded
+- `dispatch.retry` not working → dispatch must be in `stuck` status
+- Dispatch history empty → memory files are only written after dispatch completes
+
+---
+
+## Rich Notifications
+
+```bash
+# Check notification config
+cat ~/.openclaw/openclaw.json | jq '.plugins.entries["openclaw-linear"].config.notifications'
+
+# Test notifications
+openclaw openclaw-linear notify test
+
+# Check for notification failures in logs
+journalctl --user -u openclaw-gateway --since "30 min ago" | grep -i "notify\|notification"
+```
+
+Common issues:
+- No rich embeds → set `"richFormat": true` in notifications config
+- Discord embeds not showing → bot needs "Embed Links" permission in the channel
+- Telegram HTML broken → check the bot token and chat ID are correct
+
+---
+
+## Gateway RPC
+
+```bash
+# List available methods
+# Methods: dispatch.list, dispatch.get, dispatch.retry, dispatch.escalate, dispatch.cancel, dispatch.stats
+
+# Check if methods are registered
+journalctl --user -u openclaw-gateway --since "5 min ago" | grep -i "dispatch\."
+```
+
+---
+
 ## Common Issues
 
 | Symptom | Cause | Fix |
@@ -327,3 +403,8 @@ journalctl --user -u openclaw-gateway -n 50 --no-pager
 | Planning session not responding | Session expired or abandoned | Post "cancel planning" and start fresh |
 | Project issues not dispatching after plan approval | DAG dependencies blocking | Check project dispatch state — earlier issues may be stuck |
 | Doctor says "stale dispatch" | Dispatch inactive >2h | Run `openclaw openclaw-linear doctor --fix` to auto-clean |
+| Multi-repo not detected | Wrong marker format | Use `<!-- repos: api, frontend -->` in issue body |
+| `/dispatch` not responding | Plugin not loaded | Restart gateway, check `openclaw doctor` |
+| Rich notifications plain text | `richFormat` not enabled | Add `"richFormat": true` to notifications config |
+| Gateway RPC returns error | Dispatch not in expected status | Check dispatch state — retry requires `stuck` status |
+| Dispatch history empty | No completed dispatches | Memory files written only after dispatches complete |
