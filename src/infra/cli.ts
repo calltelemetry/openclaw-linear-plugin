@@ -342,4 +342,31 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
         process.exitCode = 1;
       }
     });
+
+  // --- openclaw openclaw-linear doctor ---
+  linear
+    .command("doctor")
+    .description("Run comprehensive health checks on the Linear plugin")
+    .option("--fix", "Auto-fix safe issues (chmod, stale locks, prune old dispatches)")
+    .option("--json", "Output results as JSON")
+    .action(async (opts: { fix?: boolean; json?: boolean }) => {
+      const { runDoctor, formatReport, formatReportJson } = await import("./doctor.js");
+      const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+
+      const report = await runDoctor({
+        fix: opts.fix ?? false,
+        json: opts.json ?? false,
+        pluginConfig,
+      });
+
+      if (opts.json) {
+        console.log(formatReportJson(report));
+      } else {
+        console.log(formatReport(report));
+      }
+
+      if (report.summary.errors > 0) {
+        process.exitCode = 1;
+      }
+    });
 }
