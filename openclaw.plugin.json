@@ -2,7 +2,7 @@
   "id": "openclaw-linear",
   "name": "Linear Agent",
   "description": "Linear integration with OAuth support, agent pipeline, and webhook-driven AI agent lifecycle",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
