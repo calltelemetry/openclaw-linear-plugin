@@ -203,8 +203,8 @@ describe("resolveCodingBackend", () => {
     expect(resolveCodingBackend(config)).toBe("gemini");
   });
 
-  it("falls back to claude when no config provided", () => {
-    expect(resolveCodingBackend({})).toBe("claude");
-    expect(resolveCodingBackend({}, "anyAgent")).toBe("claude");
+  it("falls back to codex when no config provided", () => {
+    expect(resolveCodingBackend({})).toBe("codex");
+    expect(resolveCodingBackend({}, "anyAgent")).toBe("codex");
   });
 });

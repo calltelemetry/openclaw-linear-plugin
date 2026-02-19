@@ -326,10 +326,10 @@ export function resolveReviewModel(pluginConfig?: Record<string, unknown>): "cla
   if (configured && ["claude", "codex", "gemini"].includes(configured)) {
     return configured as "claude" | "codex" | "gemini";
   }
-  // Always the opposite of the user's primary model
+  // Always the complement of the user's primary model
   const currentModel = (pluginConfig as any)?.agents?.defaults?.model?.primary as string ?? "";
   if (currentModel.includes("claude") || currentModel.includes("anthropic")) return "codex";
-  if (currentModel.includes("codex") || currentModel.includes("openai")) return "claude";
-  if (currentModel.includes("gemini") || currentModel.includes("google")) return "claude";
-  return "claude"; // Kimi, Mistral, etc. → Claude reviews
+  if (currentModel.includes("codex") || currentModel.includes("openai")) return "gemini";
+  if (currentModel.includes("gemini") || currentModel.includes("google")) return "codex";
+  return "gemini"; // Kimi, Mistral, other, or unconfigured → Gemini reviews
 }

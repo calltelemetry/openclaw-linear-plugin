@@ -58,7 +58,8 @@
       "maxReworkAttempts": { "type": "number", "description": "Max audit failures before escalation", "default": 2 },
       "inactivitySec": { "type": "number", "description": "Kill sessions with no I/O for this many seconds (default: 120)", "default": 120 },
       "maxTotalSec": { "type": "number", "description": "Max total runtime for agent sessions in seconds (default: 7200)", "default": 7200 },
-      "toolTimeoutSec": { "type": "number", "description": "Max runtime for a single code_run CLI invocation in seconds (default: 600)", "default": 600 }
+      "toolTimeoutSec": { "type": "number", "description": "Max runtime for a single code_run CLI invocation in seconds (default: 600)", "default": 600 },
+      "claudeApiKey": { "type": "string", "description": "Anthropic API key for Claude CLI backend (passed as ANTHROPIC_API_KEY env var)", "sensitive": true }
     }
   }
 }

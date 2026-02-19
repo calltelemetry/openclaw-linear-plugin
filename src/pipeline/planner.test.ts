@@ -294,8 +294,8 @@ describe("runPlanAudit", () => {
 
     await runPlanAudit(ctx, session);
 
-    // Default review model is "claude" (since no primary model configured)
-    expect(runClaude).toHaveBeenCalled();
+    // Default review model is "gemini" (since no primary model configured)
+    expect(runGemini).toHaveBeenCalled();
   });
 
   it("runs planner agent with review prompt including cross-model feedback", async () => {
@@ -387,20 +387,20 @@ describe("resolveReviewModel", () => {
     } as any)).toBe("codex");
   });
 
-  it("returns 'claude' when primary model is codex-based", () => {
+  it("returns 'gemini' when primary model is codex-based", () => {
     expect(resolveReviewModel({
       agents: { defaults: { model: { primary: "openai/codex-3" } } },
-    } as any)).toBe("claude");
+    } as any)).toBe("gemini");
   });
 
-  it("returns 'claude' when primary model is gemini-based", () => {
+  it("returns 'codex' when primary model is gemini-based", () => {
     expect(resolveReviewModel({
       agents: { defaults: { model: { primary: "google/gemini-2" } } },
-    } as any)).toBe("claude");
+    } as any)).toBe("codex");
   });
 
-  it("returns 'claude' when no primary model configured", () => {
-    expect(resolveReviewModel({})).toBe("claude");
+  it("returns 'gemini' when no primary model configured", () => {
+    expect(resolveReviewModel({})).toBe("gemini");
   });
 
   it("respects explicit plannerReviewModel config override", () => {

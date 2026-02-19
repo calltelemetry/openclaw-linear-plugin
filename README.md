@@ -369,9 +369,9 @@ A different AI model (always the complement of your primary model) reviews the p
 | Your primary model | Auto-reviewer |
 |---|---|
 | Claude / Anthropic | Codex |
-| Codex / OpenAI | Claude |
-| Gemini / Google | Claude |
-| Other | Claude |
+| Codex / OpenAI | Gemini |
+| Gemini / Google | Codex |
+| Other (Kimi, Mistral, etc.) | Gemini |
 
 After the review, the planner summarizes recommendations and asks you to approve:
 
@@ -469,6 +469,7 @@ Add settings under the plugin entry in `openclaw.json`:
 | `inactivitySec` | number | `120` | Kill agent if silent this long |
 | `maxTotalSec` | number | `7200` | Max total agent session time |
 | `toolTimeoutSec` | number | `600` | Max single `code_run` time |
+| `claudeApiKey` | string | — | Anthropic API key for Claude CLI (passed as `ANTHROPIC_API_KEY` env var). Required if using Claude backend. |
 
 ### Environment Variables
 
@@ -512,9 +513,17 @@ One agent must have `"isDefault": true` — that's the one that handles triage a
 
 Create `coding-tools.json` in the plugin root to configure which CLI backend agents use:
 
+> **Warning — Claude Code (Anthropic) and headless/automated usage**
+>
+> Calling Claude Code via CLI in a headless or automated context (which is how this plugin
+> uses it) may violate [Anthropic's Terms of Service](https://www.anthropic.com/terms).
+> The default backend is **Codex CLI** (OpenAI). **Gemini CLI** (Google) is used as the
+> cross-model reviewer. If you choose to use Claude despite this, you do so at your own risk.
+> See [Claude API Key](#claude-api-key) below for opt-in configuration.
+
 ```json
 {
-  "codingTool": "claude",
+  "codingTool": "codex",
   "agentCodingTools": {},
   "backends": {
     "claude": { "aliases": ["claude", "claude code", "anthropic"] },
@@ -524,7 +533,33 @@ Create `coding-tools.json` in the plugin root to configure which CLI backend age
 }
 ```
 
-The agent calls `code_run` without knowing which backend is active. Resolution order: explicit `backend` parameter > per-agent override > global default > `"claude"`.
+The agent calls `code_run` without knowing which backend is active. Resolution order: explicit `backend` parameter > per-agent override > global default > `"codex"`.
+
+#### Claude API Key
+
+If you opt in to using Claude as a backend (despite the TOS concerns noted above), you can
+provide an Anthropic API key so the Claude CLI authenticates via API key instead of its
+built-in interactive auth.
+
+Set `claudeApiKey` in the plugin config:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-linear": {
+        "config": {
+          "claudeApiKey": "sk-ant-..."
+        }
+      }
+    }
+  }
+}
+```
+
+The key is passed to the Claude CLI subprocess as the `ANTHROPIC_API_KEY` environment variable.
+You can also set `ANTHROPIC_API_KEY` as a process-level environment variable (e.g., in your
+systemd unit file) as a fallback. The plugin config value takes precedence if both are set.
 
 ---
 
@@ -822,8 +857,8 @@ Example output:
   ✔ Default agent: coder
 
   Coding Tools
-  ✔ coding-tools.json loaded (default: claude)
-  ✔ claude: found at /usr/local/bin/claude
+  ✔ coding-tools.json loaded (default: codex)
+  ✔ codex: found at /usr/local/bin/codex
 
   Files & Directories
   ✔ Dispatch state: 1 active, 5 completed

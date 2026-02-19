@@ -88,7 +88,7 @@ function resolveAlias(aliasMap: Map<string, CodingBackend>, input: string): Codi
  * Priority:
  *   1. Per-agent override: config.agentCodingTools[agentId]
  *   2. Global default: config.codingTool
- *   3. Hardcoded fallback: "claude"
+ *   3. Hardcoded fallback: "codex"
  */
 export function resolveCodingBackend(
   config: CodingToolsConfig,
@@ -104,7 +104,7 @@ export function resolveCodingBackend(
   const global = config.codingTool;
   if (global && global in BACKEND_RUNNERS) return global as CodingBackend;
 
-  return "claude";
+  return "codex";
 }
 
 /**

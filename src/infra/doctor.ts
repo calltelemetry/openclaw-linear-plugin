@@ -321,13 +321,13 @@ export function checkCodingTools(): CheckResult[] {
   const config = loadCodingConfig();
   const hasConfig = !!config.codingTool || !!config.backends;
   if (hasConfig) {
-    checks.push(pass(`coding-tools.json loaded (default: ${config.codingTool ?? "claude"})`));
+    checks.push(pass(`coding-tools.json loaded (default: ${config.codingTool ?? "codex"})`));
   } else {
     checks.push(warn("coding-tools.json not found or empty (using defaults)", undefined, { fix: "Create coding-tools.json in the plugin root — see README for format" }));
   }
 
   // Validate default backend
-  const defaultBackend = config.codingTool ?? "claude";
+  const defaultBackend = config.codingTool ?? "codex";
   if (VALID_BACKENDS.includes(defaultBackend)) {
     // already reported in the line above
   } else {

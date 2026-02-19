@@ -150,6 +150,12 @@ export async function runClaude(
     const env = { ...process.env };
     delete env.CLAUDECODE;
 
+    // Pass Anthropic API key if configured (plugin config takes precedence over env)
+    const claudeApiKey = pluginConfig?.claudeApiKey as string | undefined;
+    if (claudeApiKey) {
+      env.ANTHROPIC_API_KEY = claudeApiKey;
+    }
+
     const child = spawn(CLAUDE_BIN, args, {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: workingDir,
