@@ -300,7 +300,7 @@ describe("LinearAgentApi", () => {
       });
 
       await expect(api.updateIssue("i1", { estimate: 1 })).rejects.toThrow(
-        /Linear API 403 \(after refresh\)/,
+        /Linear API authentication failed/,
       );
     });
   });

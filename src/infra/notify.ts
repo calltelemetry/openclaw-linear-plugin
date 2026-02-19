@@ -82,26 +82,27 @@ export interface RichMessage {
 
 export function formatMessage(kind: NotifyKind, payload: NotifyPayload): string {
   const id = payload.identifier;
+  const attempt = (payload.attempt ?? 0) + 1; // 1-based for humans
   switch (kind) {
     case "dispatch":
-      return `${id} dispatched — ${payload.title}`;
+      return `${id} started — ${payload.title}`;
     case "working":
-      return `${id} worker started (attempt ${payload.attempt ?? 0})`;
+      return `${id} working on it (attempt ${attempt})`;
     case "auditing":
-      return `${id} audit in progress`;
+      return `${id} checking the work...`;
     case "audit_pass":
-      return `${id} passed audit. PR ready.`;
+      return `✅ ${id} done! Ready for review.`;
     case "audit_fail": {
-      const gaps = payload.verdict?.gaps?.join(", ") ?? "unspecified";
-      return `${id} failed audit (attempt ${payload.attempt ?? 0}). Gaps: ${gaps}`;
+      const issues = payload.verdict?.gaps?.join(", ") ?? "unspecified";
+      return `${id} needs more work (attempt ${attempt}). Issues: ${issues}`;
     }
     case "escalation":
-      return `🚨 ${id} needs human review — ${payload.reason ?? "audit failed 2x"}`;
+      return `🚨 ${id} needs your help — couldn't fix it after ${attempt} ${attempt === 1 ? "try" : "tries"}`;
     case "stuck":
-      return `⏰ ${id} stuck — ${payload.reason ?? "stale 2h"}`;
+      return `⏰ ${id} stuck — ${payload.reason ?? "inactive for 2h"}`;
     case "watchdog_kill":
-      return `⚡ ${id} killed by watchdog (${payload.reason ?? "no I/O for 120s"}). ${
-        payload.attempt != null ? `Retrying (attempt ${payload.attempt}).` : "Will retry."
+      return `⚡ ${id} timed out (${payload.reason ?? "no activity for 120s"}). ${
+        payload.attempt != null ? `Retrying (attempt ${attempt}).` : "Will retry."
       }`;
     case "project_progress":
       return `📊 ${payload.title} (${id}): ${payload.status}`;
@@ -135,10 +136,10 @@ export function formatRichMessage(kind: NotifyKind, payload: NotifyPayload): Ric
 
   // Discord embed
   const fields: DiscordEmbed["fields"] = [];
-  if (payload.attempt != null) fields.push({ name: "Attempt", value: String(payload.attempt), inline: true });
+  if (payload.attempt != null) fields.push({ name: "Attempt", value: String((payload.attempt ?? 0) + 1), inline: true });
   if (payload.status) fields.push({ name: "Status", value: payload.status, inline: true });
   if (payload.verdict?.gaps?.length) {
-    fields.push({ name: "Gaps", value: payload.verdict.gaps.join("\n").slice(0, 1024) });
+    fields.push({ name: "Issues to fix", value: payload.verdict.gaps.join("\n").slice(0, 1024) });
   }
   if (payload.reason) fields.push({ name: "Reason", value: payload.reason });
 
@@ -155,10 +156,10 @@ export function formatRichMessage(kind: NotifyKind, payload: NotifyPayload): Ric
     `<b>${escapeHtml(payload.identifier)}</b> — ${escapeHtml(kind.replace(/_/g, " "))}`,
     `<i>${escapeHtml(payload.title)}</i>`,
   ];
-  if (payload.attempt != null) htmlParts.push(`Attempt: <code>${payload.attempt}</code>`);
+  if (payload.attempt != null) htmlParts.push(`Attempt: <code>${(payload.attempt ?? 0) + 1}</code>`);
   if (payload.status) htmlParts.push(`Status: <code>${escapeHtml(payload.status)}</code>`);
   if (payload.verdict?.gaps?.length) {
-    htmlParts.push(`Gaps:\n${payload.verdict.gaps.map(g => `• ${escapeHtml(g)}`).join("\n")}`);
+    htmlParts.push(`Issues to fix:\n${payload.verdict.gaps.map(g => `• ${escapeHtml(g)}`).join("\n")}`);
   }
   if (payload.reason) htmlParts.push(`Reason: ${escapeHtml(payload.reason)}`);
 

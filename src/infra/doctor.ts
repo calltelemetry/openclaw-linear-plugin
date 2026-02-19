@@ -25,6 +25,8 @@ export interface CheckResult {
   severity: CheckSeverity;
   detail?: string;
   fixable?: boolean;
+  /** User-facing guidance on how to resolve the issue */
+  fix?: string;
 }
 
 export interface CheckSection {
@@ -66,12 +68,12 @@ function pass(label: string, detail?: string): CheckResult {
   return { label, severity: "pass", detail };
 }
 
-function warn(label: string, detail?: string, fixable = false): CheckResult {
-  return { label, severity: "warn", detail, fixable: fixable || undefined };
+function warn(label: string, detail?: string, opts?: { fixable?: boolean; fix?: string }): CheckResult {
+  return { label, severity: "warn", detail, fixable: opts?.fixable || undefined, fix: opts?.fix };
 }
 
-function fail(label: string, detail?: string): CheckResult {
-  return { label, severity: "fail", detail };
+function fail(label: string, detail?: string, fix?: string): CheckResult {
+  return { label, severity: "fail", detail, fix };
 }
 
 function resolveDispatchStatePath(pluginConfig?: Record<string, unknown>): string {
@@ -126,7 +128,7 @@ export async function checkAuth(pluginConfig?: Record<string, unknown>): Promise
   if (tokenInfo.accessToken) {
     checks.push(pass(`Access token found (source: ${tokenInfo.source})`));
   } else {
-    checks.push(fail("No access token found", "Run: openclaw openclaw-linear auth"));
+    checks.push(fail("No access token found", undefined, "Run: openclaw openclaw-linear auth"));
     // Can't check further without token
     return { checks, ctx };
   }
@@ -135,12 +137,12 @@ export async function checkAuth(pluginConfig?: Record<string, unknown>): Promise
   if (tokenInfo.expiresAt) {
     const remaining = tokenInfo.expiresAt - Date.now();
     if (remaining <= 0) {
-      checks.push(warn("Token expired", "Restart gateway to trigger auto-refresh"));
+      checks.push(warn("Token expired", undefined, { fix: "Run: openclaw openclaw-linear auth" }));
     } else {
       const hours = Math.floor(remaining / 3_600_000);
       const mins = Math.floor((remaining % 3_600_000) / 60_000);
       if (remaining < 3_600_000) {
-        checks.push(warn(`Token expires soon (${mins}m remaining)`));
+        checks.push(warn(`Token expires soon (${mins}m remaining)`, undefined, { fix: "Restart the gateway to trigger auto-refresh, or run: openclaw openclaw-linear auth" }));
       } else {
         checks.push(pass(`Token not expired (${hours}h ${mins}m remaining)`));
       }
@@ -190,8 +192,8 @@ export async function checkAuth(pluginConfig?: Record<string, unknown>): Promise
     } else {
       checks.push(warn(
         `auth-profiles.json permissions (${mode.toString(8)}, expected 600)`,
-        "Run: chmod 600 ~/.openclaw/auth-profiles.json",
-        true,
+        undefined,
+        { fixable: true, fix: "Run: chmod 600 ~/.openclaw/auth-profiles.json" },
       ));
     }
   } catch {
@@ -246,7 +248,7 @@ export function checkAgentConfig(pluginConfig?: Record<string, unknown>): CheckR
 
   const agentCount = Object.keys(profiles).length;
   if (agentCount === 0) {
-    checks.push(fail("agent-profiles.json has no agents"));
+    checks.push(fail("agent-profiles.json has no agents", undefined, "Add at least one agent to ~/.openclaw/agent-profiles.json"));
     return checks;
   }
   checks.push(pass(`agent-profiles.json loaded (${agentCount} agent${agentCount > 1 ? "s" : ""})`));
@@ -256,7 +258,7 @@ export function checkAgentConfig(pluginConfig?: Record<string, unknown>): CheckR
   if (defaultEntry) {
     checks.push(pass(`Default agent: ${defaultEntry[0]}`));
   } else {
-    checks.push(warn("No agent has isDefault: true"));
+    checks.push(warn("No agent has isDefault: true", undefined, { fix: "Add \"isDefault\": true to one agent in ~/.openclaw/agent-profiles.json" }));
   }
 
   // Required fields
@@ -270,7 +272,7 @@ export function checkAgentConfig(pluginConfig?: Record<string, unknown>): CheckR
   if (missing.length === 0) {
     checks.push(pass("All agents have required fields"));
   } else {
-    checks.push(fail(`Agent field issues: ${missing.join("; ")}`));
+    checks.push(fail(`Agent field issues: ${missing.join("; ")}`, undefined, "Each agent needs at least a \"label\" and \"mentionAliases\" array in agent-profiles.json"));
   }
 
   // defaultAgentId match
@@ -321,7 +323,7 @@ export function checkCodingTools(): CheckResult[] {
   if (hasConfig) {
     checks.push(pass(`coding-tools.json loaded (default: ${config.codingTool ?? "claude"})`));
   } else {
-    checks.push(warn("coding-tools.json not found or empty (using defaults)"));
+    checks.push(warn("coding-tools.json not found or empty (using defaults)", undefined, { fix: "Create coding-tools.json in the plugin root — see README for format" }));
   }
 
   // Validate default backend
@@ -355,7 +357,7 @@ export function checkCodingTools(): CheckResult[] {
         accessSync(bin, constants.X_OK);
         checks.push(pass(`${name}: installed (version check skipped)`));
       } catch {
-        checks.push(warn(`${name}: not found at ${bin}`));
+        checks.push(warn(`${name}: not found at ${bin}`, undefined, { fix: `Install ${name} or check that it's in your PATH` }));
       }
     }
   }
@@ -402,8 +404,8 @@ export async function checkFilesAndDirs(pluginConfig?: Record<string, unknown>, 
         } else {
           checks.push(warn(
             `Stale lock file (${Math.round(lockAge / 1000)}s old)`,
-            "Use --fix to remove",
-            true,
+            undefined,
+            { fixable: true, fix: "Run: openclaw openclaw-linear doctor --fix to remove" },
           ));
         }
       } else {
@@ -440,10 +442,10 @@ export async function checkFilesAndDirs(pluginConfig?: Record<string, unknown>, 
       });
       checks.push(pass("Base repo is valid git repo"));
     } catch {
-      checks.push(fail(`Base repo is not a git repo: ${baseRepo}`));
+      checks.push(fail(`Base repo is not a git repo: ${baseRepo}`, undefined, "Run: git init in the base repo directory, or set codexBaseRepo to a different path"));
     }
   } else {
-    checks.push(fail(`Base repo does not exist: ${baseRepo}`));
+    checks.push(fail(`Base repo does not exist: ${baseRepo}`, undefined, "Set codexBaseRepo in plugin config to your git repository path"));
   }
 
   // Prompts
@@ -482,7 +484,7 @@ export async function checkFilesAndDirs(pluginConfig?: Record<string, unknown>, 
     if (errors.length === 0) {
       checks.push(pass(`Prompts valid (${sectionCount}/5 sections, ${varCount}/4 variables)`));
     } else {
-      checks.push(fail(`Prompt issues: ${errors.join("; ")}`));
+      checks.push(fail(`Prompt issues: ${errors.join("; ")}`, undefined, "Run: openclaw openclaw-linear prompts validate for details"));
     }
   } catch (err) {
     checks.push(fail(
@@ -526,7 +528,7 @@ export async function checkConnectivity(pluginConfig?: Record<string, unknown>, 
         checks.push(fail(`Linear API: unreachable (${err instanceof Error ? err.message : String(err)})`));
       }
     } else {
-      checks.push(fail("Linear API: no token available"));
+      checks.push(fail("Linear API: no token available", undefined, "Run: openclaw openclaw-linear auth"));
     }
   }
 
@@ -602,7 +604,7 @@ export async function checkDispatchHealth(pluginConfig?: Record<string, unknown>
     checks.push(pass("No stale dispatches"));
   } else {
     const ids = stale.map((d) => d.issueIdentifier).join(", ");
-    checks.push(warn(`${stale.length} stale dispatch${stale.length > 1 ? "es" : ""}: ${ids}`));
+    checks.push(warn(`${stale.length} stale dispatch${stale.length > 1 ? "es" : ""}: ${ids}`, undefined, { fix: "Re-assign the issue to retry, or run: openclaw openclaw-linear doctor --fix to clean up" }));
   }
 
   // Orphaned worktrees
@@ -639,8 +641,8 @@ export async function checkDispatchHealth(pluginConfig?: Record<string, unknown>
     } else {
       checks.push(warn(
         `${old.length} completed dispatch${old.length > 1 ? "es" : ""} older than 7 days`,
-        "Use --fix to prune",
-        true,
+        undefined,
+        { fixable: true, fix: "Run: openclaw openclaw-linear doctor --fix to clean up old entries" },
       ));
     }
   }
@@ -737,6 +739,9 @@ export function formatReport(report: DoctorReport): string {
     lines.push(section.name);
     for (const check of section.checks) {
       lines.push(`  ${icon(check.severity)} ${check.label}`);
+      if (check.fix && check.severity !== "pass") {
+        lines.push(`    → ${check.fix}`);
+      }
     }
   }
 

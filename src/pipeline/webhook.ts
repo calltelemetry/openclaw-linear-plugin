@@ -263,7 +263,7 @@ export async function handleLinearWebhook(
 
         const responseBody = result.success
           ? result.output
-          : `I encountered an error processing this request. Please try again.`;
+          : `Something went wrong while processing this. The system will retry automatically if possible. If this keeps happening, run \`openclaw openclaw-linear doctor\` to check for issues.`;
 
         // 5. Post branded comment (fallback to prefix)
         const brandingOpts = avatarUrl
@@ -439,7 +439,7 @@ export async function handleLinearWebhook(
 
         const responseBody = result.success
           ? result.output
-          : `I encountered an error processing this request. Please try again.`;
+          : `Something went wrong while processing this. The system will retry automatically if possible. If this keeps happening, run \`openclaw openclaw-linear doctor\` to check for issues.`;
 
         // Post as comment
         const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
@@ -617,7 +617,7 @@ export async function handleLinearWebhook(
 
         const responseBody = result.success
           ? result.output
-          : `I encountered an error processing this request. Please try again.`;
+          : `Something went wrong while processing this. The system will retry automatically if possible. If this keeps happening, run \`openclaw openclaw-linear doctor\` to check for issues.`;
 
         const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
         const brandingOpts = avatarUrl
@@ -876,7 +876,7 @@ export async function handleLinearWebhook(
 
         const responseBody = result.success
           ? result.output
-          : `I encountered an error processing this request. Please try again or check the logs.`;
+          : `Something went wrong while processing this. If this keeps happening, run \`openclaw openclaw-linear doctor\` to check for issues.`;
 
         // 5. Post branded comment (fall back to [Label] prefix if branding fails)
         const brandingOpts = profile?.avatarUrl
@@ -1114,7 +1114,7 @@ export async function handleLinearWebhook(
 
         const responseBody = result.success
           ? result.output
-          : `I encountered an error triaging this issue. Please triage manually.`;
+          : `Something went wrong while triaging this issue. You may need to set the estimate and labels manually.`;
 
         // Parse triage JSON and apply to issue
         let commentBody = responseBody;
@@ -1238,7 +1238,7 @@ async function handleDispatch(
         api.logger.info(`dispatch: ${identifier} is in planning-mode project — skipping`);
         await linearApi.createComment(
           issue.id,
-          "This project is in planning mode. Finalize the plan before dispatching implementation.",
+          `**Can't dispatch yet** — this project is in planning mode.\n\n**To continue:** Comment on the planning issue with your requirements, then say **"finalize plan"** when ready.\n\n**To cancel planning:** Comment **"abandon"** on the planning issue.`,
         );
         return;
       }
@@ -1261,7 +1261,7 @@ async function handleDispatch(
       api.logger.info(`dispatch: ${identifier} actively running (status: ${existing.status}, age: ${Math.round(ageMs / 1000)}s) — skipping`);
       await linearApi.createComment(
         issue.id,
-        `Already running as **${existing.tier}** (status: ${existing.status}, started ${Math.round(ageMs / 60_000)}m ago). Worktree: \`${existing.worktreePath}\``,
+        `**Already running** as **${existing.tier}** — status: **${existing.status}**, started ${Math.round(ageMs / 60_000)}m ago.\n\nWorktree: \`${existing.worktreePath}\`\n\n**Options:**\n- Check progress: \`/dispatch status ${identifier}\`\n- Force restart: \`/dispatch retry ${identifier}\` (only works when stuck)\n- Escalate: \`/dispatch escalate ${identifier} "reason"\``,
       );
       return;
     }
@@ -1333,7 +1333,7 @@ async function handleDispatch(
     api.logger.error(`@dispatch: worktree creation failed: ${err}`);
     await linearApi.createComment(
       issue.id,
-      `Dispatch failed — could not create worktree: ${String(err).slice(0, 200)}`,
+      `**Dispatch failed** — couldn't create the worktree.\n\n> ${String(err).slice(0, 200)}\n\n**What to try:**\n- Check that the base repo exists\n- Re-assign this issue to try again\n- Check logs: \`journalctl --user -u openclaw-gateway --since "5 min ago"\``,
     );
     return;
   }

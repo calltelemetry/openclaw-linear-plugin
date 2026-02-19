@@ -32,6 +32,7 @@ worker:
     3. Implement the solution in the worktree
     4. Run tests to verify your changes
     5. Return a text summary of what you changed, what tests you ran, and any notes
+    6. Include what you did, what tests passed, and any concerns or open questions
 
     Your text output will be captured automatically. Do NOT use linearis or attempt to post comments.
 
@@ -66,6 +67,9 @@ audit:
     After auditing:
     - Post your audit findings as a comment: `linearis comments create {{identifier}} --body "..."`
     - If PASS: update status: `linearis issues update {{identifier}} --status "Done"`
+
+    When posting your audit comment, include a brief assessment: what was done well,
+    what the gaps are (if any), and what the user should look at next.
 
     You MUST return a JSON verdict as the last line of your response:
     {"pass": true/false, "criteria": ["list of criteria found"], "gaps": ["list of unmet criteria"], "testResults": "summary of test output"}

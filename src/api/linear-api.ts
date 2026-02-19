@@ -189,7 +189,7 @@ export class LinearAgentApi {
 
       if (!retryRes.ok) {
         const text = await retryRes.text();
-        throw new Error(`Linear API ${retryRes.status} (after refresh): ${text}`);
+        throw new Error(`Linear API authentication failed (${retryRes.status}). Your token may have expired. Run: openclaw openclaw-linear auth`);
       }
 
       const payload = await retryRes.json();

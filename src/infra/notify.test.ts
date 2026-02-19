@@ -24,24 +24,24 @@ describe("formatMessage", () => {
 
   it("formats dispatch message", () => {
     const msg = formatMessage("dispatch", basePayload);
-    expect(msg).toBe("API-42 dispatched — Fix auth");
+    expect(msg).toBe("API-42 started — Fix auth");
   });
 
   it("formats working message with attempt", () => {
     const msg = formatMessage("working", { ...basePayload, attempt: 1 });
-    expect(msg).toContain("worker started");
-    expect(msg).toContain("attempt 1");
+    expect(msg).toContain("working on it");
+    expect(msg).toContain("attempt 2"); // 1-based for humans
   });
 
   it("formats auditing message", () => {
     const msg = formatMessage("auditing", basePayload);
-    expect(msg).toContain("audit in progress");
+    expect(msg).toContain("checking the work");
   });
 
   it("formats audit_pass message", () => {
     const msg = formatMessage("audit_pass", basePayload);
-    expect(msg).toContain("passed audit");
-    expect(msg).toContain("PR ready");
+    expect(msg).toContain("done!");
+    expect(msg).toContain("Ready for review");
   });
 
   it("formats audit_fail message with gaps", () => {
@@ -50,8 +50,8 @@ describe("formatMessage", () => {
       attempt: 1,
       verdict: { pass: false, gaps: ["no tests", "missing validation"] },
     });
-    expect(msg).toContain("failed audit");
-    expect(msg).toContain("attempt 1");
+    expect(msg).toContain("needs more work");
+    expect(msg).toContain("attempt 2"); // 1-based for humans
     expect(msg).toContain("no tests");
     expect(msg).toContain("missing validation");
   });
@@ -68,10 +68,10 @@ describe("formatMessage", () => {
   it("formats escalation message with reason", () => {
     const msg = formatMessage("escalation", {
       ...basePayload,
-      reason: "audit failed 3x",
+      attempt: 2,
     });
-    expect(msg).toContain("needs human review");
-    expect(msg).toContain("audit failed 3x");
+    expect(msg).toContain("needs your help");
+    expect(msg).toContain("3 tries"); // 1-based
   });
 
   it("formats stuck message", () => {
@@ -87,11 +87,11 @@ describe("formatMessage", () => {
     const msg = formatMessage("watchdog_kill", {
       ...basePayload,
       attempt: 0,
-      reason: "no I/O for 120s",
+      reason: "no activity for 120s",
     });
-    expect(msg).toContain("killed by watchdog");
-    expect(msg).toContain("no I/O for 120s");
-    expect(msg).toContain("Retrying (attempt 0)");
+    expect(msg).toContain("timed out");
+    expect(msg).toContain("no activity for 120s");
+    expect(msg).toContain("Retrying (attempt 1)"); // 1-based
   });
 
   it("formats watchdog_kill without attempt", () => {
@@ -326,7 +326,7 @@ describe("createNotifierFromConfig", () => {
     expect(runtime.channel.telegram.sendMessageTelegram).toHaveBeenCalledOnce();
     expect(runtime.channel.telegram.sendMessageTelegram).toHaveBeenCalledWith(
       "-100388",
-      expect.stringContaining("worker started"),
+      expect.stringContaining("working on it"),
       { silent: true },
     );
   });
@@ -429,7 +429,7 @@ describe("formatRichMessage", () => {
     const msg = formatRichMessage("audit_fail", { ...basePayload, attempt: 1, verdict: { pass: false, gaps: ["no tests"] } });
     expect(msg.discord!.embeds[0].color).toBe(0xe74c3c);
     expect(msg.discord!.embeds[0].fields).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "Gaps", value: "no tests" })]),
+      expect.arrayContaining([expect.objectContaining({ name: "Issues to fix", value: "no tests" })]),
     );
   });
 
@@ -446,7 +446,7 @@ describe("formatRichMessage", () => {
 
   it("includes plain text fallback", () => {
     const msg = formatRichMessage("dispatch", basePayload);
-    expect(msg.text).toBe("CT-10 dispatched — Add caching");
+    expect(msg.text).toBe("CT-10 started — Add caching");
   });
 });
 

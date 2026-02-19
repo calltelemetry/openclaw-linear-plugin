@@ -462,6 +462,11 @@ export async function processVerdict(
   const verdict = parseVerdict(auditOutput);
   if (!verdict) {
     api.logger.warn(`${TAG} could not parse audit verdict from output (${auditOutput.length} chars)`);
+    // Post comment so user knows what happened
+    await linearApi.createComment(
+      dispatch.issueId,
+      `## Audit Inconclusive\n\nThe auditor's response couldn't be parsed as a verdict. **Retrying automatically** — this usually resolves itself.\n\n**If it keeps happening:** \`openclaw openclaw-linear prompts validate\`\n\n**Status:** Retrying audit now. No action needed.`,
+    ).catch((err) => api.logger.error(`${TAG} failed to post inconclusive comment: ${err}`));
     // Treat unparseable verdict as failure
     await handleAuditFail(hookCtx, dispatch, {
       pass: false,
@@ -545,7 +550,7 @@ async function handleAuditPass(
   const summaryExcerpt = summary ? `\n\n**Summary:**\n${summary.slice(0, 2000)}` : "";
   await linearApi.createComment(
     dispatch.issueId,
-    `## Audit Passed\n\n**Criteria verified:**\n${criteriaList}\n\n**Tests:** ${verdict.testResults || "N/A"}${summaryExcerpt}\n\n---\n*Attempt ${dispatch.attempt + 1} — audit passed. Artifacts: \`${dispatch.worktreePath}/.claw/\`*`,
+    `## Done\n\nThis issue has been implemented and verified.\n\n**What was checked:**\n${criteriaList}\n\n**Test results:** ${verdict.testResults || "N/A"}${summaryExcerpt}\n\n---\n*Completed on attempt ${dispatch.attempt + 1}.*\n\n**Next steps:**\n- Review the code: \`cd ${dispatch.worktreePath}\`\n- View artifacts: \`ls ${dispatch.worktreePath}/.claw/\`\n- Create a PR from the worktree branch if one wasn't opened automatically`,
   ).catch((err) => api.logger.error(`${TAG} failed to post audit pass comment: ${err}`));
 
   api.logger.info(`${TAG} audit PASSED — dispatch completed (attempt ${dispatch.attempt})`);
@@ -621,7 +626,7 @@ async function handleAuditFail(
     const gapsList = verdict.gaps.map((g) => `- ${g}`).join("\n");
     await linearApi.createComment(
       dispatch.issueId,
-      `## Audit Failed — Escalating\n\n**Attempt ${nextAttempt} of ${maxAttempts + 1}**\n\n**Gaps:**\n${gapsList}\n\n**Tests:** ${verdict.testResults || "N/A"}\n\n---\n*Max rework attempts reached. Needs human review. Artifacts: \`${dispatch.worktreePath}/.claw/\`*`,
+      `## Needs Your Help\n\nAll ${nextAttempt} attempts failed. The agent couldn't resolve these issues on its own.\n\n**What went wrong:**\n${gapsList}\n\n**Test results:** ${verdict.testResults || "N/A"}\n\n---\n\n**What you can do:**\n1. **Clarify requirements** — update the issue body with more detail, then re-assign to try again\n2. **Fix it manually** — the agent's work is in the worktree: \`cd ${dispatch.worktreePath}\`\n3. **Force retry** — \`/dispatch retry ${dispatch.issueIdentifier}\`\n4. **View logs** — worker output: \`.claw/worker-*.md\`, audit verdicts: \`.claw/audit-*.json\``,
     ).catch((err) => api.logger.error(`${TAG} failed to post escalation comment: ${err}`));
 
     api.logger.warn(`${TAG} audit FAILED ${nextAttempt}x — escalating to human`);
@@ -665,7 +670,7 @@ async function handleAuditFail(
   const gapsList = verdict.gaps.map((g) => `- ${g}`).join("\n");
   await linearApi.createComment(
     dispatch.issueId,
-    `## Audit Failed — Rework\n\n**Attempt ${nextAttempt} of ${maxAttempts + 1}**\n\n**Gaps:**\n${gapsList}\n\n**Tests:** ${verdict.testResults || "N/A"}\n\n---\n*Reworking: addressing gaps above.*`,
+    `## Needs More Work\n\nThe audit found gaps. **Retrying now** — the worker gets the feedback below as context.\n\n**Attempt ${nextAttempt} of ${maxAttempts + 1}** — ${maxAttempts + 1 - nextAttempt > 0 ? `${maxAttempts + 1 - nextAttempt} more ${maxAttempts + 1 - nextAttempt === 1 ? "retry" : "retries"} if this fails too` : "this is the last attempt"}.\n\n**What needs fixing:**\n${gapsList}\n\n**Test results:** ${verdict.testResults || "N/A"}\n\n**Status:** Worker is restarting with the gaps above as context. No action needed unless all retries fail.`,
   ).catch((err) => api.logger.error(`${TAG} failed to post rework comment: ${err}`));
 
   api.logger.info(`${TAG} audit FAILED — rework attempt ${nextAttempt}/${maxAttempts + 1}`);
@@ -821,8 +826,9 @@ export async function spawnWorker(
 
     await linearApi.createComment(
       dispatch.issueId,
-      `## Watchdog Kill\n\nAgent killed by inactivity watchdog (no I/O for ${thresholdSec}s). ` +
-      `Automatic retry also failed.\n\n---\n*Needs human review. Artifacts: \`${dispatch.worktreePath}/.claw/\`*`,
+      `## Agent Timed Out\n\nThe agent stopped responding for over ${thresholdSec}s. It was automatically restarted, but the retry also timed out.\n\n` +
+      `**What you can do:**\n1. **Try again** — re-assign this issue or \`/dispatch retry ${dispatch.issueIdentifier}\`\n2. **Break it down** — if it keeps timing out, split into smaller issues\n3. **Increase timeout** — set \`inactivitySec\` higher in your agent profile\n\n` +
+      `**Logs:** \`${dispatch.worktreePath}/.claw/log.jsonl\` (look for \`"phase": "watchdog"\`)\n\n**Current status:** Stuck — waiting for you.`,
     ).catch(() => {});
 
     await hookCtx.notify("watchdog_kill", {

@@ -382,6 +382,25 @@ describe("formatReport", () => {
     expect(output).toContain("1 passed");
     expect(output).toContain("1 warning");
   });
+
+  it("shows fix guidance for warnings and errors", () => {
+    const report = {
+      sections: [
+        {
+          name: "Auth",
+          checks: [
+            { label: "Token expired", severity: "warn" as const, fix: "Run: openclaw openclaw-linear auth" },
+            { label: "All good", severity: "pass" as const, fix: "Should not appear" },
+          ],
+        },
+      ],
+      summary: { passed: 1, warnings: 1, errors: 0 },
+    };
+
+    const output = formatReport(report);
+    expect(output).toContain("→ Run: openclaw openclaw-linear auth");
+    expect(output).not.toContain("Should not appear");
+  });
 });
 
 describe("formatReportJson", () => {

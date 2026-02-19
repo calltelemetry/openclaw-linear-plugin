@@ -174,7 +174,7 @@ describe("E2E dispatch pipeline", () => {
     // Verify Linear comment was posted for audit pass
     expect(hookCtx.mockLinearApi.createComment).toHaveBeenCalledWith(
       "issue-1",
-      expect.stringContaining("Audit Passed"),
+      expect.stringContaining("Done"),
     );
 
     // Verify artifacts exist
@@ -227,7 +227,7 @@ describe("E2E dispatch pipeline", () => {
     // Rework comment posted
     expect(hookCtx.mockLinearApi.createComment).toHaveBeenCalledWith(
       "issue-1",
-      expect.stringContaining("Audit Failed — Rework"),
+      expect.stringContaining("Needs More Work"),
     );
 
     // Second run (rework) — dispatch is already in "working" state
@@ -280,7 +280,7 @@ describe("E2E dispatch pipeline", () => {
     // Escalation comment
     expect(hookCtx.mockLinearApi.createComment).toHaveBeenCalledWith(
       "issue-1",
-      expect.stringContaining("Escalating"),
+      expect.stringContaining("Needs Your Help"),
     );
   });
 
@@ -320,7 +320,7 @@ describe("E2E dispatch pipeline", () => {
     // Watchdog comment
     expect(hookCtx.mockLinearApi.createComment).toHaveBeenCalledWith(
       "issue-1",
-      expect.stringContaining("Watchdog Kill"),
+      expect.stringContaining("Agent Timed Out"),
     );
   });
 
