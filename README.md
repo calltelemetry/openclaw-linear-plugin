@@ -3,7 +3,35 @@
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.2+-blue)](https://github.com/calltelemetry/openclaw)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-An OpenClaw plugin that connects Linear to AI agents. Issues get triaged automatically, agents respond to `@mentions`, and a worker-audit pipeline runs when you assign work -- with an inactivity watchdog that kills and respawns stuck sessions.
+An OpenClaw plugin that connects [Linear](https://linear.app) to AI agents. Your agents triage new issues, respond to `@mentions`, implement code when you assign work, and automatically verify their own output -- with a watchdog that kills stuck sessions.
+
+**In plain English:** You create issues in Linear. AI agents read them, estimate the work, and when you assign one, an agent writes the code, a *separate* agent checks it, and the issue gets marked done. If the check fails, the code gets fixed automatically. If something hangs, the watchdog kills it and tries again. You just write issues.
+
+---
+
+## Quick Start
+
+Already know what you're doing? Here's the short version:
+
+```bash
+# 1. Install the plugin
+openclaw plugins install @calltelemetry/openclaw-linear
+
+# 2. Authorize with Linear (opens browser)
+openclaw openclaw-linear auth
+
+# 3. Set up webhooks in Linear → Settings → API → Applications
+#    Webhook URL: https://<your-domain>/linear/webhook
+#    Enable: Agent Sessions, Comments, Issues
+
+# 4. Restart the gateway
+systemctl --user restart openclaw-gateway
+
+# 5. Verify everything works
+openclaw openclaw-linear doctor
+```
+
+That's it. Create an issue in Linear and assign it to your agent. See [Getting Started](#getting-started) for the full walkthrough.
 
 ---
 
@@ -20,6 +48,7 @@ An OpenClaw plugin that connects Linear to AI agents. Issues get triaged automat
 - [Notifications](#notifications)
 - [Coding Tool](#coding-tool-code_run)
 - [Inactivity Watchdog](#inactivity-watchdog)
+- [Testing](#testing)
 - [CLI Reference](#cli-reference)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
@@ -191,20 +220,24 @@ openclaw-linear/
 |-- openclaw.plugin.json      Plugin metadata and config schema
 |-- prompts.yaml              Externalized worker/audit/rework prompt templates
 |-- coding-tools.json         Backend config (default tool, per-agent overrides)
+|-- vitest.config.ts          Test runner config
 |-- package.json
 |-- README.md
 |-- docs/
 |   |-- architecture.md       Internal architecture reference
 |   +-- troubleshooting.md    Diagnostic commands and common issues
+|-- scripts/
+|   +-- uat-linear.ts         Live integration tests against real Linear workspace
 +-- src/
     |-- pipeline/              Core dispatch lifecycle
     |   |-- webhook.ts             Event router -- 6 webhook handlers, dispatch logic
-    |   |-- pipeline.ts            v2 pipeline: spawnWorker, triggerAudit, processVerdict
+    |   |-- pipeline.ts            Worker-audit pipeline: spawnWorker, triggerAudit, processVerdict
     |   |-- dispatch-state.ts      File-backed state, CAS transitions, session mapping
     |   |-- dispatch-service.ts    Background monitor: stale detection, recovery, cleanup
     |   |-- active-session.ts      In-memory session registry (issueId -> session)
     |   |-- tier-assess.ts         Issue complexity assessment (junior/medior/senior)
     |   |-- artifacts.ts           .claw/ directory: manifest, logs, verdicts, summaries
+    |   |-- dag-dispatch.ts        DAG-based project dispatch (topological issue ordering)
     |   |-- planner.ts             Project planner orchestration (interview, audit)
     |   +-- planning-state.ts      File-backed planning state (mirrors dispatch-state)
     |
@@ -227,10 +260,22 @@ openclaw-linear/
     |   |-- auth.ts                OAuth provider registration
     |   +-- oauth-callback.ts      HTTP handler for OAuth redirect
     |
-    +-- infra/                 Infrastructure utilities
-        |-- cli.ts                 CLI subcommands (auth, status, worktrees, prompts)
-        |-- codex-worktree.ts      Git worktree create/remove/status/PR helpers
-        +-- notify.ts              Multi-channel notifier (Discord, Slack, Telegram, Signal)
+    |-- infra/                 Infrastructure utilities
+    |   |-- cli.ts                 CLI subcommands (auth, status, worktrees, prompts)
+    |   |-- commands.ts            Zero-LLM slash commands for dispatch operations
+    |   |-- codex-worktree.ts      Git worktree create/remove/status/PR helpers
+    |   |-- doctor.ts              Health check system (auth, config, connectivity, dispatch)
+    |   |-- file-lock.ts           Exclusive file locking for state files
+    |   |-- multi-repo.ts          Multi-repo resolution (issue body, labels, config)
+    |   |-- notify.ts              Multi-channel notifier (Discord, Slack, Telegram, Signal)
+    |   |-- observability.ts       Structured diagnostic event logging
+    |   +-- resilience.ts          Retry with exponential backoff + circuit breaker
+    |
+    +-- __test__/              Shared test infrastructure
+        |-- helpers.ts             Mock factories (API, Linear, HookContext, temp paths)
+        +-- fixtures/
+            |-- webhook-payloads.ts    Linear webhook event factories
+            +-- linear-responses.ts    GraphQL response factories
 ```
 
 ---
@@ -561,7 +606,8 @@ Add a `notifications` object to your plugin config:
             ],
             "events": {
               "auditing": false
-            }
+            },
+            "richFormat": true
           }
         }
       }
@@ -578,6 +624,8 @@ Add a `notifications` object to your plugin config:
 | `target` | Yes | Channel/group/user ID to send to |
 | `accountId` | No | Account ID for multi-account setups (Slack) |
 
+**`richFormat`** -- Set to `true` for rich notifications: Discord embeds (colored sidebar, fields) and Telegram HTML. Default is plain text.
+
 **`events`** -- Per-event-type toggles. All events are enabled by default. Set to `false` to suppress.
 
 ### Events
@@ -592,6 +640,8 @@ Add a `notifications` object to your plugin config:
 | Escalation | `escalation` | `API-123 needs human review -- audit failed 3x` |
 | Stale detection | `stuck` | `API-123 stuck -- stale 2h` |
 | Watchdog kill | `watchdog_kill` | `API-123 killed by watchdog (no I/O for 120s). Retrying (attempt 0).` |
+| Project progress | `project_progress` | `Project "Search": PROJ-2 done (2/5 complete)` |
+| Project complete | `project_complete` | `Project "Search" fully dispatched -- all 5 issues done` |
 
 ### Delivery
 
@@ -726,6 +776,41 @@ Watchdog kills are logged to `log.jsonl` with phase `"watchdog"`:
     "retried": true
   }
 }
+```
+
+---
+
+## Testing
+
+319 tests across 20 files. Takes about 10 seconds.
+
+```bash
+# Run all tests
+npx vitest run
+
+# Run with coverage report
+npx vitest run --coverage
+
+# Run a specific test file
+npx vitest run src/pipeline/pipeline.test.ts
+
+# Watch mode (re-runs on save)
+npx vitest
+```
+
+### Test Types
+
+| Type | Files | What they test |
+|------|-------|----------------|
+| **Unit tests** | `*.test.ts` next to source | Individual functions with mocked dependencies |
+| **E2E tests** | `e2e-dispatch.test.ts`, `e2e-planning.test.ts` | Full pipeline chains with real file-backed state (only external boundaries mocked) |
+| **UAT** | `scripts/uat-linear.ts` | Live tests against a real Linear workspace (requires gateway + tunnel running) |
+
+Run the UAT suite before releases:
+
+```bash
+npx tsx scripts/uat-linear.ts              # All 3 tests
+npx tsx scripts/uat-linear.ts --test dispatch   # Single test
 ```
 
 ---

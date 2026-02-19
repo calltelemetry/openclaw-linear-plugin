@@ -282,6 +282,37 @@ The `auditPlan()` function is pure/deterministic (no LLM call):
 
 While a project is in planning mode, the dispatch pipeline skips issues in that project. A comment explains: "This project is in planning mode. Finalize the plan before dispatching implementation."
 
+## DAG Dispatch (`dag-dispatch.ts`)
+
+After a project plan is approved, the DAG dispatcher walks the issue dependency graph in topological order. Leaf issues (no blockers) dispatch first; as each completes, its dependents become eligible.
+
+### State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> dispatching : plan approved
+    dispatching --> dispatching : issue completes, more pending
+    dispatching --> completed : all issues done
+    dispatching --> stuck : issue stuck, no progress possible
+    stuck --> dispatching : stuck issue resolved
+```
+
+### Issue-Level Status
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Blocked by dependencies |
+| `dispatched` | Sent to worker-audit pipeline |
+| `done` | Passed audit |
+| `stuck` | Failed audit or watchdog killed |
+| `skipped` | Epic (organizational only, not dispatched) |
+
+### Cascade Logic
+
+- `onProjectIssueCompleted(projectId, identifier)` — marks issue done, dispatches newly-unblocked dependents, checks if project is complete
+- `onProjectIssueStuck(projectId, identifier)` — marks issue stuck, checks if project has no remaining progress path
+- State persists in `planning-state.json` alongside planning sessions
+
 ---
 
 ## @Mention Routing
@@ -366,7 +397,8 @@ linear/
     |   |-- tier-assess.ts         Complexity assessment (junior/medior/senior)
     |   |-- artifacts.ts           .claw/ directory artifacts + memory integration
     |   |-- planner.ts             Project planner orchestration (interview, audit)
-    |   +-- planning-state.ts      File-backed planning state (mirrors dispatch-state)
+    |   |-- planning-state.ts      File-backed planning state (mirrors dispatch-state)
+    |   +-- dag-dispatch.ts        DAG-based project dispatch (topological ordering)
     |
     |-- agent/                 Agent execution & monitoring
     |   |-- agent.ts               Embedded runner + subprocess, watchdog + retry
@@ -387,8 +419,51 @@ linear/
     |   |-- auth.ts                OAuth provider registration
     |   +-- oauth-callback.ts      OAuth callback handler
     |
-    +-- infra/                 Infrastructure utilities
-        |-- cli.ts                 CLI subcommands
-        |-- codex-worktree.ts      Git worktree management
-        +-- notify.ts              Multi-channel notifier (Discord, Slack, Telegram, Signal)
+    |-- infra/                 Infrastructure utilities
+    |   |-- cli.ts                 CLI subcommands
+    |   |-- codex-worktree.ts      Git worktree management
+    |   |-- notify.ts              Multi-channel notifier (Discord, Slack, Telegram, Signal)
+    |   |-- commands.ts            Zero-LLM slash commands for dispatch operations
+    |   |-- doctor.ts              Health check system (auth, config, connectivity, dispatch)
+    |   |-- file-lock.ts           Exclusive file locking for state files
+    |   |-- multi-repo.ts          Multi-repo resolution (issue body, labels, config)
+    |   |-- observability.ts       Structured diagnostic event logging
+    |   +-- resilience.ts          Retry with exponential backoff + circuit breaker
+    |
+    |-- __test__/              Shared test infrastructure
+    |   |-- helpers.ts             Mock factories (API, Linear, HookContext, temp paths)
+    |   +-- fixtures/
+    |       |-- webhook-payloads.ts    Linear webhook event factories
+    |       +-- linear-responses.ts    GraphQL response factories
+    |
+    +-- scripts/
+        +-- uat-linear.ts         Live integration tests against real Linear workspace
+```
+
+---
+
+## Testing Infrastructure
+
+319 tests across 20 files (~10s runtime).
+
+### Test Layers
+
+| Layer | What's mocked | What runs for real |
+|-------|--------------|-------------------|
+| **Unit tests** | All imports via `vi.mock` | Single module under test |
+| **E2E tests** | External boundaries only (runAgent, Linear API, codex-worktree) | Full pipeline chain with file-backed state |
+| **UAT** | Nothing | Full stack against real Linear workspace |
+
+### Shared Helpers (`src/__test__/`)
+
+- `helpers.ts` — `createMockApi()`, `createMockLinearApi()`, `createMockHookCtx()`, `tmpStatePath()`
+- `fixtures/webhook-payloads.ts` — Factory functions for all Linear webhook event types
+- `fixtures/linear-responses.ts` — Factory functions for GraphQL response shapes
+
+### Running Tests
+
+```bash
+npx vitest run                    # All tests
+npx vitest run --coverage         # With coverage report
+npx tsx scripts/uat-linear.ts     # Live UAT (requires gateway + tunnel)
 ```

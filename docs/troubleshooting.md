@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Operational reference for diagnosing issues with the Linear agent plugin.
+Something not working? Start here. Most problems have simple fixes.
 
 ---
 
@@ -14,6 +14,31 @@ journalctl --user -u openclaw-gateway -f         # Live logs
 linearis issues list -l 1                        # linearis auth working?
 openclaw openclaw-linear prompts validate        # Prompts valid?
 ```
+
+---
+
+## Doctor Command
+
+The plugin has a built-in health checker that diagnoses most problems automatically:
+
+```bash
+openclaw openclaw-linear doctor            # Run all checks
+openclaw openclaw-linear doctor --fix      # Auto-fix safe issues (stale locks, old dispatches)
+openclaw openclaw-linear doctor --json     # Machine-readable output
+```
+
+It checks 6 areas:
+
+| Check | What it looks for |
+|-------|-------------------|
+| **Auth** | Token exists, not expired, Linear API responds |
+| **Agent Config** | Default agent set, no duplicate mention aliases |
+| **Files & Config** | Dispatch state readable, prompts valid, permissions correct |
+| **Connectivity** | Gateway reachable, webhook endpoint responds, tunnel working |
+| **Dispatch Health** | No stale dispatches, no stuck issues older than threshold |
+| **Coding Tools** | CLI binaries found in PATH (claude, codex, gemini) |
+
+If something's wrong, doctor tells you exactly what and how to fix it. Run this first before digging into logs.
 
 ---
 
@@ -217,6 +242,33 @@ cat ~/.openclaw/linear-dispatch-state.json | jq '.processedEvents | length'
 
 ---
 
+## Planning State
+
+```bash
+# View active planning sessions
+cat ~/.openclaw/linear-planning-state.json | jq '.sessions'
+
+# Check a specific project's planning status
+cat ~/.openclaw/linear-planning-state.json | jq '.sessions["<projectId>"]'
+
+# View project dispatch state (after plan approved)
+cat ~/.openclaw/linear-planning-state.json | jq '.projectDispatches["<projectId>"]'
+
+# Check which issues are pending/dispatched/done/stuck in a project
+cat ~/.openclaw/linear-planning-state.json | jq '.projectDispatches["<projectId>"].issues | to_entries[] | {identifier: .key, status: .value.dispatchStatus}'
+```
+
+### Common Planning Issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "This project is in planning mode" | Dispatch blocked during active planning | Finalize or abandon the plan first |
+| Plan audit keeps failing | Issues missing descriptions, estimates, or priorities | Check audit feedback comment for specifics |
+| Planning session stuck | No recent turns, session abandoned | Post "cancel planning" on the root issue |
+| Project dispatch stuck | One issue stuck, blocking dependents | Check stuck issue's `.claw/log.jsonl`, re-assign to retry |
+
+---
+
 ## Config Validation
 
 ```bash
@@ -272,3 +324,6 @@ journalctl --user -u openclaw-gateway -n 50 --no-pager
 | `code_run` killed by watchdog | CLI hung with no output | Check CLI binary availability. Increase `toolTimeoutSec` if legitimate slow operations. |
 | OAuth callback 501/502 | Tunnel routing issue | Verify tunnel config routes to gateway port |
 | Port "Address already in use" | TIME_WAIT sockets | Wait 60s, or check with `ss -tan \| grep TIME-WAIT` |
+| Planning session not responding | Session expired or abandoned | Post "cancel planning" and start fresh |
+| Project issues not dispatching after plan approval | DAG dependencies blocking | Check project dispatch state — earlier issues may be stuck |
+| Doctor says "stale dispatch" | Dispatch inactive >2h | Run `openclaw openclaw-linear doctor --fix` to auto-clean |
