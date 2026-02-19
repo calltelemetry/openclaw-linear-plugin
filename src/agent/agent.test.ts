@@ -204,6 +204,55 @@ describe("runAgent subprocess", () => {
   });
 });
 
+describe("runAgent date/time injection", () => {
+  it("injects current date/time into the message sent to subprocess", async () => {
+    const api = createApi();
+    const runCmd = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify({ result: { payloads: [{ text: "done" }] } }),
+      stderr: "",
+    });
+    (api.runtime.system as any).runCommandWithTimeout = runCmd;
+
+    await runAgent({
+      api,
+      agentId: "test",
+      sessionId: "s1",
+      message: "do something",
+    });
+
+    // The --message arg should contain the date context prefix
+    const args: string[] = runCmd.mock.calls[0][0];
+    const msgIdx = args.indexOf("--message");
+    const passedMessage = args[msgIdx + 1];
+    expect(passedMessage).toMatch(/^\[Current date\/time:.*\d{4}.*\]/);
+    expect(passedMessage).toContain("do something");
+  });
+
+  it("includes ISO timestamp in the injected context", async () => {
+    const api = createApi();
+    const runCmd = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: "ok",
+      stderr: "",
+    });
+    (api.runtime.system as any).runCommandWithTimeout = runCmd;
+
+    await runAgent({
+      api,
+      agentId: "test",
+      sessionId: "s1",
+      message: "test task",
+    });
+
+    const args: string[] = runCmd.mock.calls[0][0];
+    const msgIdx = args.indexOf("--message");
+    const passedMessage = args[msgIdx + 1];
+    // Should contain ISO format like 2026-02-19T05:45:00.000Z
+    expect(passedMessage).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  });
+});
+
 describe("runAgent retry wrapper", () => {
   it("returns success on first attempt when no watchdog kill", async () => {
     const api = createApi();

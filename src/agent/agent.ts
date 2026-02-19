@@ -95,6 +95,27 @@ export async function runAgent(params: {
   return { success: false, output: "Watchdog retry exhausted" };
 }
 
+// ---------------------------------------------------------------------------
+// Date/time injection — every LLM request gets the current timestamp so models
+// don't hallucinate the year (Kimi K2.5 thinks it's 2025).
+// ---------------------------------------------------------------------------
+
+function buildDateContext(): string {
+  const now = new Date();
+  const iso = now.toISOString();
+  // Human-readable: "Tuesday, February 18, 2026, 11:42 PM CST"
+  const human = now.toLocaleString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  return `[Current date/time: ${human} (${iso})]`;
+}
+
 /**
  * Single attempt to run an agent (no retry logic).
  */
@@ -106,7 +127,11 @@ async function runAgentOnce(params: {
   timeoutMs?: number;
   streaming?: AgentStreamCallbacks;
 }): Promise<AgentRunResult> {
-  const { api, agentId, sessionId, message, streaming } = params;
+  const { api, agentId, sessionId, streaming } = params;
+
+  // Inject current timestamp into every LLM request
+  const message = `${buildDateContext()}\n\n${params.message}`;
+
   const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
   const wdConfig = resolveWatchdogConfig(agentId, pluginConfig);
   const timeoutMs = params.timeoutMs ?? wdConfig.maxTotalMs;
