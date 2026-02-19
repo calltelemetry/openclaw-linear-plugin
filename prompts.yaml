@@ -28,11 +28,13 @@ worker:
 
     Instructions:
     1. Read the issue body carefully — it defines what needs to be done
-    2. Plan your approach
-    3. Implement the solution in the worktree
-    4. Run tests to verify your changes
-    5. Return a text summary of what you changed, what tests you ran, and any notes
-    6. Include what you did, what tests passed, and any concerns or open questions
+    2. If the description is vague or missing, implement a reasonable interpretation and note your assumptions
+    3. Plan your approach
+    4. Implement the solution in the worktree
+    5. Run tests to verify your changes
+    6. If tests fail, diagnose and fix the failures before returning — do not return with failing tests unless you've exhausted your ability to fix them
+    7. Commit your work with a clear commit message
+    8. Return a text summary: what you changed, what tests passed, any assumptions you made, and any open questions
 
     Your text output will be captured automatically. Do NOT use linearis or attempt to post comments.
 
@@ -79,7 +81,8 @@ rework:
     PREVIOUS AUDIT FAILED (attempt {{attempt}}). The auditor found these gaps:
     {{gaps}}
 
-    Address these specific issues in your rework. Focus on the gaps listed above.
+    Address these specific issues in your rework. Focus ONLY on the gaps listed above.
+    Do NOT undo or rewrite parts that already work — preserve correct code from prior attempts.
     Remember: you do NOT have linearis access. Just fix the code and return a text summary.
 
 planner:
@@ -101,6 +104,8 @@ planner:
     - After each user response, create or update issues to capture what you learned.
     - Briefly summarize what you added before asking your next question.
     - When the plan feels complete, invite the user to say "finalize plan".
+    - If the user is vague ("make it better", "you decide"), propose concrete options and ask them to pick.
+    - If you've gathered enough info after several turns with no new details, suggest: "This looks ready — say **finalize plan** when you're happy with it."
 
   interview: |
     ## Project: {{projectName}} ({{rootIdentifier}})
@@ -126,5 +131,10 @@ planner:
     I'm entering planning mode for **{{projectName}}**. I'll interview you about the
     features you want to build, then structure everything into Linear issues with proper
     epic hierarchy and dependency chains.
+
+    **How this works:**
+    - I'll ask questions one at a time and create issues as we go
+    - When you're happy with the plan, say **"finalize plan"** — I'll validate it and start dispatching
+    - If you want to stop, say **"abandon planning"**
 
     Let's start — what is this project about, and what are the main feature areas?

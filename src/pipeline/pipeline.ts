@@ -60,15 +60,15 @@ interface PromptTemplates {
 
 const DEFAULT_PROMPTS: PromptTemplates = {
   worker: {
-    system: "You are implementing a Linear issue. Post an implementation summary as a Linear comment when done. DO NOT mark the issue as Done.",
-    task: "Implement issue {{identifier}}: {{title}}\n\nIssue body:\n{{description}}\n\nWorktree: {{worktreePath}}",
+    system: "You are a coding worker implementing a Linear issue. Your ONLY job is to write code and return a text summary. Do NOT attempt to update, close, comment on, or modify the Linear issue. Do NOT mark the issue as Done.",
+    task: "Implement issue {{identifier}}: {{title}}\n\nIssue body:\n{{description}}\n\nWorktree: {{worktreePath}}\n\nImplement the solution, run tests, commit your work, and return a text summary.",
   },
   audit: {
     system: "You are an independent auditor. The Linear issue body is the SOURCE OF TRUTH. Worker comments are secondary evidence.",
     task: 'Audit issue {{identifier}}: {{title}}\n\nIssue body:\n{{description}}\n\nWorktree: {{worktreePath}}\n\nReturn JSON verdict: {"pass": true/false, "criteria": [...], "gaps": [...], "testResults": "..."}',
   },
   rework: {
-    addendum: "PREVIOUS AUDIT FAILED (attempt {{attempt}}). Gaps:\n{{gaps}}\n\nAddress these specific issues.",
+    addendum: "PREVIOUS AUDIT FAILED (attempt {{attempt}}). Gaps:\n{{gaps}}\n\nAddress these specific issues. Preserve correct code from prior attempts.",
   },
 };
 
@@ -201,7 +201,7 @@ export function buildWorkerTask(
     worktreePath,
     tier: "",
     attempt: String(opts?.attempt ?? 0),
-    gaps: opts?.gaps?.join("\n- ") ?? "",
+    gaps: opts?.gaps?.length ? "- " + opts.gaps.join("\n- ") : "",
   };
 
   let task = renderTemplate(prompts.worker.task, vars);

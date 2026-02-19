@@ -124,8 +124,8 @@ export async function initiatePlanningSession(
 // Interview turn
 // ---------------------------------------------------------------------------
 
-const FINALIZE_PATTERN = /\b(finalize\s+plan|finalize|done\s+planning|approve\s+plan|plan\s+looks\s+good)\b/i;
-const ABANDON_PATTERN = /\b(abandon|cancel\s+planning|stop\s+planning|exit\s+planning)\b/i;
+const FINALIZE_PATTERN = /\b(finalize\s+(the\s+)?plan\b|done\s+planning\b(?!\s+\w)|approve\s+(the\s+)?plan\b|plan\s+looks\s+good\b|ready\s+to\s+finalize\b|let'?s\s+finalize\b)/i;
+const ABANDON_PATTERN = /\b(abandon\s+plan(ning)?|cancel\s+plan(ning)?|stop\s+planning|exit\s+planning|quit\s+planning)\b/i;
 
 export async function handlePlannerTurn(
   ctx: PlannerContext,

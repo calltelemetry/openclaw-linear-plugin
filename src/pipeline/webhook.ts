@@ -684,7 +684,7 @@ export async function handleLinearWebhook(
             const planState = await readPlanningState(planStatePath);
 
             // Check if this is a plan initiation request
-            const isPlanRequest = /\b(plan|planning)\s+(this\s+)?(project|out)\b/i.test(commentBody);
+            const isPlanRequest = /\b(plan|planning)\s+(this\s+)(project|out)\b/i.test(commentBody) || /\bplan\s+this\s+out\b/i.test(commentBody);
             if (isPlanRequest && !isInPlanningMode(planState, projectId)) {
               api.logger.info(`Planning: initiation requested on ${issue.identifier ?? issue.id}`);
               void initiatePlanningSession(
@@ -698,7 +698,15 @@ export async function handleLinearWebhook(
             // Route to planner if project is in planning mode
             if (isInPlanningMode(planState, projectId)) {
               const session = getPlanningSession(planState, projectId);
-              if (session && comment?.id && !wasRecentlyProcessed(`plan-comment:${comment.id}`)) {
+              if (!session) {
+                api.logger.error(`Planning: project ${projectId} in planning mode but no session found — state may be corrupted`);
+                await linearApiForPlanning.createComment(
+                  issue.id,
+                  `**Planning mode is active** for this project, but the session state appears corrupted.\n\n**To fix:** Say **"abandon planning"** to exit planning mode, then start fresh with **"plan this project"**.`,
+                ).catch(() => {});
+                return true;
+              }
+              if (comment?.id && !wasRecentlyProcessed(`plan-comment:${comment.id}`)) {
                 api.logger.info(`Planning: routing comment to planner for ${session.projectName}`);
                 void handlePlannerTurn(
                   { api, linearApi: linearApiForPlanning, pluginConfig },
@@ -1028,6 +1036,27 @@ export async function handleLinearWebhook(
           }
         } catch (err) {
           api.logger.warn(`Could not fetch issue details for triage: ${err}`);
+        }
+
+        // Skip triage for issues in projects that are actively being planned —
+        // the planner creates issues and triage would overwrite its estimates/labels.
+        const triageProjectId = enrichedIssue?.project?.id;
+        if (triageProjectId) {
+          const planStatePath = pluginConfig?.planningStatePath as string | undefined;
+          try {
+            const planState = await readPlanningState(planStatePath);
+            if (isInPlanningMode(planState, triageProjectId)) {
+              api.logger.info(`Issue.create: ${issue.identifier ?? issue.id} belongs to project in planning mode — skipping triage`);
+              return;
+            }
+          } catch { /* proceed with triage if planning state check fails */ }
+        }
+
+        // Skip triage for issues created by our own bot user
+        const viewerId = await linearApi.getViewerId();
+        if (viewerId && issue.creatorId === viewerId) {
+          api.logger.info(`Issue.create: ${issue.identifier ?? issue.id} created by our bot — skipping triage`);
+          return;
         }
 
         const description = enrichedIssue?.description ?? issue?.description ?? "(no description)";
@@ -1423,6 +1452,13 @@ async function handleDispatch(
       ? `Worktrees ${worktreeResumed ? "(resumed)" : "(fresh)"}:\n${worktreeDesc}`
       : `Worktree: ${worktreeDesc} ${worktreeResumed ? "(resumed)" : "(fresh)"}`,
     `Branch: \`${worktreeBranch}\``,
+    ``,
+    `**Status:** Worker is starting now. An independent audit runs automatically after implementation.`,
+    ``,
+    `**While you wait:**`,
+    `- Check progress: \`/dispatch status ${identifier}\``,
+    `- Cancel: \`/dispatch escalate ${identifier} "reason"\``,
+    `- All dispatches: \`/dispatch list\``,
   ].join("\n");
 
   await linearApi.createComment(issue.id, statusComment);

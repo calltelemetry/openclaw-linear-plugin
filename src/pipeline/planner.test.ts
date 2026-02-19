@@ -251,7 +251,7 @@ describe("handlePlannerTurn", () => {
 
     await handlePlannerTurn(ctx, session, {
       issueId: "issue-1",
-      commentBody: "abandon",
+      commentBody: "abandon planning",
       commentorName: "Tester",
     });
 
