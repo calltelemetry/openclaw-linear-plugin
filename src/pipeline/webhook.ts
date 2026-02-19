@@ -951,6 +951,10 @@ export async function handleLinearWebhook(
           message,
           timeoutMs: 3 * 60_000,
           streaming: agentSessionId ? { linearApi, agentSessionId } : undefined,
+          // Triage is strictly read-only: the agent can read/search the
+          // codebase but all write-capable tools are denied via config
+          // policy.  The only artifacts are a Linear comment + issue updates.
+          readOnly: true,
         });
 
         const responseBody = result.success

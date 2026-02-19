@@ -68,6 +68,12 @@ export async function runAgent(params: {
   message: string;
   timeoutMs?: number;
   streaming?: AgentStreamCallbacks;
+  /**
+   * Read-only mode: agent keeps read tools (read, glob, grep, web_search,
+   * web_fetch) but all write-capable tools are denied via config policy.
+   * Subprocess fallback is blocked — only the embedded runner is safe.
+   */
+  readOnly?: boolean;
 }): Promise<AgentRunResult> {
   const maxAttempts = 2;
 
@@ -126,8 +132,9 @@ async function runAgentOnce(params: {
   message: string;
   timeoutMs?: number;
   streaming?: AgentStreamCallbacks;
+  readOnly?: boolean;
 }): Promise<AgentRunResult> {
-  const { api, agentId, sessionId, streaming } = params;
+  const { api, agentId, sessionId, streaming, readOnly } = params;
 
   // Inject current timestamp into every LLM request
   const message = `${buildDateContext()}\n\n${params.message}`;
@@ -136,24 +143,60 @@ async function runAgentOnce(params: {
   const wdConfig = resolveWatchdogConfig(agentId, pluginConfig);
   const timeoutMs = params.timeoutMs ?? wdConfig.maxTotalMs;
 
-  api.logger.info(`Dispatching agent ${agentId} for session ${sessionId} (timeout=${Math.round(timeoutMs / 1000)}s, inactivity=${Math.round(wdConfig.inactivityMs / 1000)}s)`);
+  api.logger.info(`Dispatching agent ${agentId} for session ${sessionId} (timeout=${Math.round(timeoutMs / 1000)}s, inactivity=${Math.round(wdConfig.inactivityMs / 1000)}s${readOnly ? ", mode=READ_ONLY" : ""})`);
 
   // Try embedded runner first (has streaming callbacks)
   if (streaming) {
     try {
-      return await runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming, wdConfig.inactivityMs);
+      return await runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming, wdConfig.inactivityMs, readOnly);
     } catch (err) {
+      // Read-only mode MUST NOT fall back to subprocess — subprocess runs a
+      // full agent with no way to enforce the tool deny policy.
+      if (readOnly) {
+        api.logger.error(`Embedded runner failed in read-only mode, refusing subprocess fallback: ${err}`);
+        return { success: false, output: "Read-only agent run failed (embedded runner unavailable)." };
+      }
       api.logger.warn(`Embedded runner failed, falling back to subprocess: ${err}`);
     }
   }
 
   // Fallback: subprocess (no streaming)
+  if (readOnly) {
+    api.logger.error("Cannot run read-only agent via subprocess — no tool policy enforcement");
+    return { success: false, output: "Read-only agent run requires the embedded runner." };
+  }
   return runSubprocess(api, agentId, sessionId, message, timeoutMs);
 }
 
 /**
  * Embedded agent runner with real-time streaming to Linear and inactivity watchdog.
  */
+// Tools denied in read-only mode.  Uses OpenClaw group:* shorthands where
+// possible (see https://docs.openclaw.ai/tools).  Covers every built-in
+// tool that can mutate the filesystem, execute commands, or produce
+// side-effects beyond the Linear API calls the plugin makes after the run.
+//
+// NOT denied (read-only tools the triage agent keeps):
+//   read, glob, grep/search          — codebase inspection
+//   group:web (web_search, web_fetch) — external context
+//   group:memory (memory_search/get)  — knowledge retrieval
+//   sessions_list, sessions_history   — read-only introspection
+const READ_ONLY_DENY: string[] = [
+  // group:fs = read + write + edit + apply_patch — but we need read,
+  // so deny the write-capable members individually.
+  "write", "edit", "apply_patch",
+  // Full groups that are entirely write/side-effect oriented:
+  "group:runtime",                          // exec, bash, process
+  "group:messaging",                        // message
+  "group:ui",                               // browser, canvas
+  "group:automation",                       // cron, gateway
+  "group:nodes",                            // nodes
+  // Individual tools not covered by a group:
+  "sessions_spawn", "sessions_send",        // agent orchestration
+  "tts",                                    // audio file generation
+  "image",                                  // image file generation
+];
+
 async function runEmbedded(
   api: OpenClawPluginApi,
   agentId: string,
@@ -162,12 +205,26 @@ async function runEmbedded(
   timeoutMs: number,
   streaming: AgentStreamCallbacks,
   inactivityMs: number,
+  readOnly?: boolean,
 ): Promise<AgentRunResult> {
   const ext = await getExtensionAPI();
 
   // Load config so we can resolve agent dirs and providers correctly.
-  const config = await api.runtime.config.loadConfig();
-  const configAny = config as Record<string, any>;
+  let config = await api.runtime.config.loadConfig();
+  let configAny = config as Record<string, any>;
+
+  // ── Read-only enforcement ──────────────────────────────────────────
+  // Clone the config and inject a tools.deny policy that strips every
+  // write-capable tool.  The deny list is merged with any existing deny
+  // entries so we don't clobber operator-level restrictions.
+  if (readOnly) {
+    configAny = JSON.parse(JSON.stringify(configAny));
+    config = configAny as typeof config;
+    if (!configAny.tools) configAny.tools = {};
+    const existing: string[] = Array.isArray(configAny.tools.deny) ? configAny.tools.deny : [];
+    configAny.tools.deny = [...new Set([...existing, ...READ_ONLY_DENY])];
+    api.logger.info(`Read-only mode: tools.deny = [${configAny.tools.deny.join(", ")}]`);
+  }
 
   // Resolve workspace and agent dirs from config (ext API ignores agentId).
   const dirs = resolveAgentDirs(agentId, configAny);
@@ -233,6 +290,13 @@ async function runEmbedded(
     abortSignal: controller.signal,
     shouldEmitToolResult: () => true,
     shouldEmitToolOutput: () => true,
+    ...(readOnly ? {
+      extraSystemPrompt: [
+        "READ-ONLY MODE: You may read and search files but you MUST NOT",
+        "write, edit, create, or delete any files. Do not run shell commands.",
+        "Your only output is your text response.",
+      ].join(" "),
+    } : {}),
 
     // Stream reasoning/thinking to Linear
     onReasoningStream: (payload) => {
