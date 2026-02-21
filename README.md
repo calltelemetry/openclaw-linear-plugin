@@ -1,9 +1,61 @@
 # @calltelemetry/openclaw-linear
 
+[![CI](https://github.com/calltelemetry/openclaw-linear-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/calltelemetry/openclaw-linear-plugin/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/calltelemetry/openclaw-linear-plugin/graph/badge.svg)](https://codecov.io/gh/calltelemetry/openclaw-linear-plugin)
+[![npm](https://img.shields.io/npm/v/@calltelemetry/openclaw-linear)](https://www.npmjs.com/package/@calltelemetry/openclaw-linear)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.2+-blue)](https://github.com/calltelemetry/openclaw)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Connect Linear to AI agents. Issues get triaged, implemented, and audited — automatically.
+
+---
+
+## Why This Exists
+
+Linear is a great project tracker. But it doesn't orchestrate AI agents — it just gives you issues, comments, and sessions. Without something bridging that gap, every stage of an AI-driven workflow requires a human in the loop: copy the issue context, start an agent, wait, read the output, decide what's next, start another agent, paste in the feedback, repeat. That's not autonomous — that's babysitting.
+
+This plugin makes the full lifecycle hands-off:
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant Linear
+    participant Plugin
+    participant Worker as Worker Agent
+    participant Auditor as Auditor Agent
+
+    You->>Linear: Create issue
+    Note over Plugin: auto-triage
+    Linear-->>You: Estimate, labels, priority
+
+    You->>Linear: Assign to agent
+    Plugin->>Worker: dispatch (isolated worktree)
+    Worker-->>Plugin: implementation done
+    Plugin->>Auditor: audit (automatic, hard-enforced)
+    alt Pass
+        Auditor-->>Plugin: ✅ verdict
+        Plugin-->>Linear: Done
+    else Fail (retries left)
+        Auditor-->>Plugin: ❌ gaps
+        Plugin->>Worker: rework (gaps injected)
+    else Fail (no retries)
+        Auditor-->>Plugin: ❌ stuck
+        Plugin-->>You: 🚨 needs your help
+    end
+```
+
+**What Linear can't do on its own — and what this plugin handles:**
+
+| Problem | What the plugin does |
+|---|---|
+| **No agent orchestration** | Assigns complexity tiers, picks the right model, creates isolated worktrees, runs workers, triggers audits, processes verdicts — all from a single issue assignment |
+| **No independent verification** | Hard-enforces a worker → auditor boundary in plugin code. The worker cannot mark its own work done. The audit is not optional and not LLM-mediated. |
+| **No failure recovery** | Watchdog kills hung agents after configurable silence. Retries once automatically. Feeds audit failures back as context for rework. Escalates when retries are exhausted. |
+| **No multi-agent routing** | Routes `@mentions` and natural language ("hey kaylee look at this") to specific agents. Intent classifier handles plan requests, questions, close commands, and work requests. |
+| **No webhook deduplication** | Linear sends events from two separate webhook systems that can overlap. The plugin deduplicates across session IDs, comment IDs, and assignment events with a 60s sliding window. |
+| **No project-scale planning** | Planner interviews you, creates issues with user stories and acceptance criteria, runs a cross-model review, then dispatches the full dependency graph — up to 3 issues in parallel. |
+
+The end result: you work in Linear. You create issues, assign them, comment in plain English. The agents do the rest — or tell you when they can't.
 
 ---
 
@@ -59,45 +111,70 @@ flowchart TB
 
 **How it works:** `cloudflared` opens an outbound connection to Cloudflare's edge and keeps it alive. Cloudflare routes incoming HTTPS requests for your hostname back through the tunnel to `localhost:18789`. No inbound firewall rules needed.
 
-#### Setup
+#### Install cloudflared
 
 ```bash
-# Install cloudflared
-# RHEL/AlmaLinux:
-sudo dnf install cloudflared
-# Or download: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+# RHEL / Rocky / Alma
+sudo dnf install -y cloudflared
 
-# Authenticate (opens browser, saves cert to ~/.cloudflared/)
-cloudflared tunnel login
+# Debian / Ubuntu
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" \
+  | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update && sudo apt install -y cloudflared
 
-# Create a named tunnel
-cloudflared tunnel create openclaw-linear
-# Note the tunnel UUID from the output (e.g., da1f21bf-856e-49ea-83c2-d210092d96be)
+# macOS
+brew install cloudflare/cloudflare/cloudflared
 ```
+
+#### Authenticate with Cloudflare
+
+```bash
+cloudflared tunnel login
+```
+
+This opens your browser. You must:
+1. Log in to your Cloudflare account
+2. **Select the domain** (zone) for the tunnel (e.g., `yourdomain.com`)
+3. Click **Authorize**
+
+Cloudflare writes an origin certificate to `~/.cloudflared/cert.pem`. This cert grants `cloudflared` permission to create tunnels and DNS records under that domain.
+
+> **Prerequisite:** Your domain must already be on Cloudflare (nameservers pointed to Cloudflare). If it's not, add it in the Cloudflare dashboard first.
+
+#### Create a tunnel
+
+```bash
+cloudflared tunnel create openclaw-linear
+```
+
+This outputs a **Tunnel ID** (UUID like `da1f21bf-856e-...`) and writes credentials to `~/.cloudflared/<TUNNEL_ID>.json`.
+
+#### DNS — point your hostname to the tunnel
+
+```bash
+cloudflared tunnel route dns openclaw-linear linear.yourdomain.com
+```
+
+This creates a CNAME record in Cloudflare DNS: `linear.yourdomain.com → <TUNNEL_ID>.cfargotunnel.com`. You can verify it in the Cloudflare dashboard under **DNS > Records**. You can also create this record manually.
+
+The hostname you choose here is what you'll use for **both** webhook URLs and the OAuth redirect URI in Linear. Make sure they all match.
 
 #### Configure the tunnel
 
 Create `/etc/cloudflared/config.yml` (system-wide) or `~/.cloudflared/config.yml` (user):
 
 ```yaml
-tunnel: <your-tunnel-uuid>
-credentials-file: /home/<user>/.cloudflared/<your-tunnel-uuid>.json
+tunnel: <TUNNEL_ID>
+credentials-file: /home/<user>/.cloudflared/<TUNNEL_ID>.json
 
 ingress:
-  - hostname: your-domain.com
+  - hostname: linear.yourdomain.com
     service: http://localhost:18789
   - service: http_status:404    # catch-all, reject unmatched requests
 ```
 
-#### DNS
-
-Point your hostname to the tunnel:
-
-```bash
-cloudflared tunnel route dns <your-tunnel-uuid> your-domain.com
-```
-
-This creates a CNAME record in Cloudflare DNS. You can also do this manually in the Cloudflare dashboard.
+The `ingress` rule routes all traffic for your hostname to the gateway on localhost. The catch-all `http_status:404` rejects requests for any other hostname.
 
 #### Run as a service
 
@@ -105,9 +182,18 @@ This creates a CNAME record in Cloudflare DNS. You can also do this manually in 
 # Install as system service (recommended for production)
 sudo cloudflared service install
 sudo systemctl enable --now cloudflared
+```
 
-# Verify
-curl -s https://your-domain.com/linear/webhook \
+To test without installing as a service:
+
+```bash
+cloudflared tunnel run openclaw-linear
+```
+
+#### Verify end-to-end
+
+```bash
+curl -s https://linear.yourdomain.com/linear/webhook \
   -X POST -H "Content-Type: application/json" \
   -d '{"type":"test","action":"ping"}'
 # Should return: "ok"
@@ -1235,6 +1321,21 @@ flowchart TD
 **State persistence:** Dispatch state is written to `~/.openclaw/linear-dispatch-state.json` with active dispatches, completed history, session mappings, and processed event IDs.
 
 **Watchdog:** A configurable inactivity timer (`inactivitySec`, default 120s) monitors agent output. If no tool calls or text output for the configured period, the agent process is killed and retried once. If the retry also times out, the dispatch is escalated.
+
+### Dispatch State Machine
+
+All transitions use compare-and-swap (CAS) to prevent races. `dispatch-state.json` is the canonical source of truth.
+
+```mermaid
+stateDiagram-v2
+    [*] --> DISPATCHED
+    DISPATCHED --> WORKING
+    WORKING --> AUDITING
+    AUDITING --> DONE
+    AUDITING --> WORKING : FAIL (attempt++)
+    WORKING --> STUCK : watchdog kill 2x
+    AUDITING --> STUCK : attempt > max
+```
 
 ### `linear_issues` Tool → API Mapping
 

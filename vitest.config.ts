@@ -20,7 +20,7 @@ export default defineConfig({
         "src/agent/watchdog.ts",
         "src/infra/doctor.ts",
       ],
-      reporter: ["text", "text-summary"],
+      reporter: ["text", "text-summary", "lcov"],
     },
   },
 });
