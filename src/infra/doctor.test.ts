@@ -519,7 +519,7 @@ describe("checkCodeRunDeep", () => {
     }
   });
 
-  // API key tests — these are fast (no live invocation), use separate calls
+  // API key tests — still call checkCodeRunDeep which runs live CLI checks
   it("detects API key from plugin config", async () => {
     const origKey = process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
@@ -533,7 +533,7 @@ describe("checkCodeRunDeep", () => {
       if (origKey) process.env.ANTHROPIC_API_KEY = origKey;
       else delete process.env.ANTHROPIC_API_KEY;
     }
-  });
+  }, 120_000);
 
   it("warns when API key missing", async () => {
     const origKeys = {
@@ -556,5 +556,5 @@ describe("checkCodeRunDeep", () => {
         else delete process.env[k];
       }
     }
-  });
+  }, 120_000);
 });

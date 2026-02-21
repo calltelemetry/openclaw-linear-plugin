@@ -16,6 +16,7 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - **Say "let's plan the features"?** A planner interviews you, writes user stories, and builds your full issue hierarchy.
 - **Plan looks good?** A different AI model automatically audits the plan before dispatch.
 - **Agent goes silent?** A watchdog kills it and retries automatically.
+- **Linear guidance?** Workspace and team-level guidance from Linear flows into every agent prompt — triage, dispatch, worker, audit.
 - **Want updates?** Get notified on Discord, Slack, Telegram, or Signal.
 
 ---
@@ -495,6 +496,8 @@ Add settings under the plugin entry in `openclaw.json`:
 | `inactivitySec` | number | `120` | Kill agent if silent this long |
 | `maxTotalSec` | number | `7200` | Max total agent session time |
 | `toolTimeoutSec` | number | `600` | Max single `code_run` time |
+| `enableGuidance` | boolean | `true` | Inject Linear workspace/team guidance into agent prompts |
+| `teamGuidanceOverrides` | object | — | Per-team guidance toggle. Key = team ID, value = boolean. Unset teams inherit `enableGuidance`. |
 | `claudeApiKey` | string | — | Anthropic API key for Claude CLI (passed as `ANTHROPIC_API_KEY` env var). Required if using Claude backend. |
 
 ### Environment Variables
@@ -652,6 +655,37 @@ Prompts merge in this order (later layers override earlier ones):
 
 Each layer only overrides the specific sections you define. Everything else keeps its default.
 
+### Linear Guidance
+
+Linear's [agent guidance system](https://linear.app/docs/agents-in-linear) lets admins configure workspace-wide and team-specific instructions for agents. This plugin automatically extracts that guidance and appends it as supplementary instructions to all agent prompts.
+
+Guidance is configured in Linear at:
+- **Workspace level:** Settings > Agents > Additional guidance (applies across entire org)
+- **Team level:** Team settings > Agents > Additional guidance (takes priority over workspace guidance)
+
+See [Agents in Linear](https://linear.app/docs/agents-in-linear) for full documentation on how guidance works.
+
+Guidance flows into:
+- **Orchestrator prompts** — AgentSessionEvent and comment handler paths
+- **Worker prompts** — Appended to the task via `{{guidance}}` template variable
+- **Audit prompts** — Appended to the audit task
+- **Triage and closure prompts** — Appended to the triage and close_issue handlers
+
+Guidance is cached per-team (24h TTL) so comment webhooks (which don't carry guidance from Linear) can also benefit.
+
+**Disable guidance globally:**
+```json
+{ "enableGuidance": false }
+```
+
+**Disable for a specific team:**
+```json
+{
+  "enableGuidance": true,
+  "teamGuidanceOverrides": { "team-id-here": false }
+}
+```
+
 ### Example Custom Prompts
 
 ```yaml
@@ -690,6 +724,7 @@ rework:
 | `{{planSnapshot}}` | Current plan structure (planner prompts) |
 | `{{reviewModel}}` | Name of cross-model reviewer (planner review) |
 | `{{crossModelFeedback}}` | Review recommendations (planner review) |
+| `{{guidance}}` | Linear workspace/team guidance (if available, empty string otherwise) |
 
 ### CLI
 
@@ -856,6 +891,245 @@ Configure per-agent in `agent-profiles.json` or globally in plugin config.
 
 ---
 
+## Agent Tools
+
+Every agent session gets these registered tools. They're available as native tool calls — no CLI parsing, no shell execution, no flag guessing.
+
+### `code_run` — Coding backend dispatch
+
+Sends a task to whichever coding CLI is configured (Codex, Claude Code, or Gemini). The agent writes the prompt; the plugin handles backend selection, worktree setup, and output capture.
+
+### `linear_issues` — Native Linear API
+
+Agents call `linear_issues` with typed JSON parameters. The tool wraps the Linear GraphQL API directly and handles all name-to-ID resolution automatically.
+
+| Action | What it does | Key parameters |
+|---|---|---|
+| `read` | Get full issue details (status, labels, comments, relations) | `issueId` |
+| `create` | Create a new issue or sub-issue | `title`, `description`, `teamId` or `parentIssueId` |
+| `update` | Change status, priority, labels, estimate, or title | `issueId` + fields |
+| `comment` | Post a comment on an issue | `issueId`, `body` |
+| `list_states` | Get available workflow states for a team | `teamId` |
+| `list_labels` | Get available labels for a team | `teamId` |
+
+**Sub-issues:** Use `action="create"` with `parentIssueId` to create sub-issues under an existing issue. The new issue inherits `teamId` and `projectId` from its parent automatically. Agents are instructed to break large work into sub-issues for granular tracking — any task with multiple distinct deliverables should be decomposed. Auditors can also create sub-issues for remaining work when an implementation is partial.
+
+### `spawn_agent` / `ask_agent` — Multi-agent orchestration
+
+Delegate work to other crew agents. `spawn_agent` is fire-and-forget (parallel), `ask_agent` waits for a reply (synchronous). Disabled with `enableOrchestration: false`.
+
+### `dispatch_history` — Recent dispatch context
+
+Returns recent dispatch activity. Agents use this for situational awareness when working on related issues.
+
+### Access model
+
+Not all agents get write access. The webhook prompts enforce this:
+
+| Context | `linear_issues` access | `code_run` |
+|---|---|---|
+| Triaged issue (In Progress, etc.) | Full (read + create + update + comment) | Yes |
+| Untriaged issue (Backlog, Triage) | Read only | Yes |
+| Auditor | Full (read + create + update + comment) | Yes |
+| Worker (inside `code_run`) | None | N/A |
+
+---
+
+## Linear API & Hook Architecture
+
+This section documents every interaction between the plugin and the Linear GraphQL API, the webhook event routing, the hook lifecycle, and the dispatch pipeline internals.
+
+### GraphQL API Layer
+
+All Linear API calls go through `LinearAgentApi` (`src/api/linear-api.ts`), which wraps `https://api.linear.app/graphql` with automatic token refresh, retry resilience, and 401 recovery.
+
+**Token resolution** (`resolveLinearToken`) checks three sources in priority order:
+
+1. `pluginConfig.accessToken` — static config
+2. Auth profile store (`~/.openclaw/auth-profiles.json`) — OAuth tokens with auto-refresh
+3. `LINEAR_ACCESS_TOKEN` / `LINEAR_API_KEY` environment variable
+
+OAuth tokens get a `Bearer` prefix; personal API keys do not. Tokens are refreshed 60 seconds before expiry via `refreshLinearToken()`, and the refreshed credentials are persisted back to the auth profile store.
+
+**API methods by category:**
+
+| Category | Method | GraphQL Operation | Used By |
+|---|---|---|---|
+| **Issues** | `getIssueDetails(issueId)` | `query Issue` | Triage, audit, close, `linear_issues` tool |
+| | `createIssue(input)` | `mutation IssueCreate` | Planner |
+| | `updateIssue(issueId, input)` | `mutation IssueUpdate` | Triage (labels, estimate, priority) |
+| | `updateIssueExtended(issueId, input)` | `mutation IssueUpdate` | `linear_issues` tool, close handler |
+| | `createIssueRelation(input)` | `mutation IssueRelationCreate` | Planner (dependency DAG) |
+| **Comments** | `createComment(issueId, body, opts)` | `mutation CommentCreate` | All phases (fallback delivery) |
+| | `createReaction(commentId, emoji)` | `mutation ReactionCreate` | Acknowledgment reactions |
+| **Sessions** | `createSessionOnIssue(issueId)` | `mutation AgentSessionCreateOnIssue` | Comment handler, close handler |
+| | `emitActivity(sessionId, content)` | `mutation AgentActivityCreate` | Primary response delivery |
+| | `updateSession(sessionId, input)` | `mutation AgentSessionUpdate` | External URLs, plan text |
+| **Teams** | `getTeamStates(teamId)` | `query TeamStates` | `linear_issues` tool, close handler |
+| | `getTeamLabels(teamId)` | `query TeamLabels` | `linear_issues` tool, triage |
+| | `getTeams()` | `query Teams` | Doctor health check |
+| | `createLabel(teamId, name, opts)` | `mutation IssueLabelCreate` | Triage (auto-create labels) |
+| **Projects** | `getProject(projectId)` | `query Project` | Planner |
+| | `getProjectIssues(projectId)` | `query ProjectIssues` | Planner, DAG dispatch |
+| **Webhooks** | `listWebhooks()` | `query Webhooks` | Doctor, webhook setup CLI |
+| | `createWebhook(input)` | `mutation WebhookCreate` | Webhook setup CLI |
+| | `updateWebhook(id, input)` | `mutation WebhookUpdate` | Webhook management |
+| | `deleteWebhook(id)` | `mutation WebhookDelete` | Webhook cleanup |
+| **Notifications** | `getAppNotifications(count)` | `query Notifications` | Doctor (connectivity check) |
+| **Identity** | `getViewerId()` | `query Viewer` | Self-comment filtering |
+
+### Webhook Event Routing
+
+The plugin registers an HTTP route at `/linear/webhook` that receives POST payloads from two Linear webhook sources:
+
+1. **Workspace webhook** — `Comment.create`, `Issue.update`, `Issue.create`
+2. **OAuth app webhook** — `AgentSessionEvent.created`, `AgentSessionEvent.prompted`
+
+Both must point to the same URL. `AgentSessionEvent` payloads carry workspace/team guidance which is extracted, cached per-team, and appended to all agent prompts. Comment webhook paths use the cached guidance since Linear does not include guidance in `Comment.create` payloads. See [Linear Guidance](#linear-guidance).
+
+The handler dispatches by `type + action`:
+
+```
+Incoming POST /linear/webhook
+  │
+  ├─ type=AgentSessionEvent, action=created
+  │    └─ New agent session on issue → dedup → create LinearAgentApi → run agent
+  │
+  ├─ type=AgentSessionEvent, action=prompted
+  │    └─ Follow-up message in existing session → dedup → resume agent with context
+  │
+  ├─ type=Comment, action=create
+  │    └─ Comment on issue → filter self-comments (viewerId) → dedup →
+  │       intent classify → route to handler (see Intent Classification below)
+  │
+  ├─ type=Issue, action=update
+  │    └─ Issue field changed → check assignment → if assigned to app user →
+  │       dispatch (triage or full implementation)
+  │
+  ├─ type=Issue, action=create
+  │    └─ New issue created → triage (estimate, labels, priority)
+  │
+  └─ type=AppUserNotification
+       └─ Immediately discarded (duplicates workspace webhook events)
+```
+
+### Intent Classification
+
+When a `Comment.create` event arrives, the plugin classifies the user's intent using a two-tier system:
+
+1. **LLM classifier** (~300 tokens, ~2-5s) — a small/fast model parses the comment and returns structured JSON with intent + reasoning
+2. **Regex fallback** — if the LLM call fails or times out, static patterns catch common cases
+
+| Intent | Trigger | Handler |
+|---|---|---|
+| `plan_start` | "let's plan the features" | Start planner interview session |
+| `plan_finalize` | "looks good, ship it" | Run plan audit + cross-model review |
+| `plan_abandon` | "cancel planning" | End planning session |
+| `plan_continue` | Any message during active planning | Continue planner conversation |
+| `ask_agent` | "@kaylee" or "hey kaylee" | Route to specific agent by name |
+| `request_work` | "fix the search bug" | Dispatch to default agent |
+| `question` | "what's the status?" | Agent answers without code changes |
+| `close_issue` | "close this" / "mark as done" | Generate closure report + transition state |
+| `general` | Noise, automated messages | Silently dropped |
+
+### Hook Lifecycle
+
+The plugin registers three lifecycle hooks via `api.on()` in `index.ts`:
+
+**`agent_end`** — Dispatch pipeline state machine. When a sub-agent (worker or auditor) finishes:
+- Looks up the session key in dispatch state to find the active dispatch
+- Validates the attempt number matches (rejects stale events from old retries)
+- If the worker finished → triggers the audit phase (`triggerAudit`)
+- If the auditor finished → processes the verdict (`processVerdict` → pass/fail/stuck)
+
+**`before_agent_start`** — Context injection. For `linear-worker-*` and `linear-audit-*` sessions:
+- Reads dispatch state and finds up to 3 active dispatches
+- Prepends a `<dispatch-history>` block so the agent has situational awareness of concurrent work
+
+**`message_sending`** — Narration guard. Catches short (~250 char) "Let me explore..." responses where the agent narrates intent without actually calling tools:
+- Appends a warning: "Agent acknowledged but may not have completed the task"
+- Prevents users from thinking the agent did something when it only said it would
+
+### Response Delivery
+
+Agent responses follow an **emitActivity-first** pattern:
+
+1. Try `emitActivity(sessionId, { type: "response", body })` — appears as agent activity in Linear's UI, no duplicate comment
+2. If `emitActivity` fails (no session, API error) → fall back to `createComment(issueId, body)`
+3. Comments posted outside sessions use `createCommentWithDedup()` — pre-registers the comment ID to prevent the echo webhook from triggering reprocessing
+
+### Close Issue Flow
+
+When intent classification returns `close_issue`:
+
+```
+close_issue intent
+  │
+  ├─ Fetch full issue details (getIssueDetails)
+  ├─ Find team's "completed" state (getTeamStates → type=completed)
+  ├─ Create agent session on issue (createSessionOnIssue)
+  ├─ Emit "preparing closure report" thought (emitActivity)
+  ├─ Run agent in read-only mode to generate closure report (runAgent)
+  ├─ Transition issue state to completed (updateIssue → stateId)
+  └─ Post closure report (emitActivity → createComment fallback)
+```
+
+This is a **static action** — the intent triggers direct API calls orchestrated by the plugin, not by giving the agent write tools. The agent only generates the closure report text; all state transitions are handled by the plugin.
+
+### Dispatch Pipeline Internals
+
+The full dispatch flow for implementing an issue:
+
+```
+Issue assigned to app user
+  │
+  ├─ 1. Assess complexity tier (runAgent → junior/medior/senior)
+  ├─ 2. Create isolated git worktree (createWorktree)
+  ├─ 3. Register dispatch in state file (registerDispatch)
+  ├─ 4. Write .claw/manifest.json with issue metadata
+  ├─ 5. Notify: "dispatched as {tier}"
+  │
+  ├─ 6. Worker phase (spawnWorker)
+  │    ├─ Build prompt from prompts.yaml (worker.system + worker.task)
+  │    ├─ If retry: append rework.addendum with prior audit gaps
+  │    ├─ Tool access: code_run YES, linear_issues NO
+  │    └─ Output captured as text → saved to .claw/worker-{attempt}.md
+  │
+  ├─ 7. Audit phase (triggerAudit)
+  │    ├─ Build prompt from prompts.yaml (audit.system + audit.task)
+  │    ├─ Tool access: code_run YES, linear_issues READ+WRITE
+  │    ├─ Auditor verifies acceptance criteria, runs tests, reviews diff
+  │    └─ Must return JSON verdict: {pass, criteria, gaps, testResults}
+  │
+  └─ 8. Verdict (processVerdict)
+       ├─ PASS → updateIssue(stateId=Done), post summary, notify ✅
+       ├─ FAIL + retries left → back to step 6 with audit gaps as context
+       └─ FAIL + no retries → escalate, notify 🚨, status="stuck"
+```
+
+**State persistence:** Dispatch state is written to `~/.openclaw/linear-dispatch-state.json` with active dispatches, completed history, session mappings, and processed event IDs.
+
+**Watchdog:** A configurable inactivity timer (`inactivitySec`, default 120s) monitors agent output. If no tool calls or text output for the configured period, the agent process is killed and retried once. If the retry also times out, the dispatch is escalated.
+
+### `linear_issues` Tool → API Mapping
+
+The `linear_issues` registered tool translates agent requests into `LinearAgentApi` method calls:
+
+| Tool Action | API Methods Called |
+|---|---|
+| `read` | `getIssueDetails(issueId)` |
+| `create` | `getIssueDetails(parentIssueId)` (if parent) → `getTeamLabels` (if labels) → `createIssue(input)` |
+| `update` | `getIssueDetails` → `getTeamStates` (if status) → `getTeamLabels` (if labels) → `updateIssueExtended` |
+| `comment` | `createComment(issueId, body)` |
+| `list_states` | `getTeamStates(teamId)` |
+| `list_labels` | `getTeamLabels(teamId)` |
+
+The `update` action's key feature is **name-to-ID resolution**: agents say `status: "In Progress"` and the tool automatically resolves it to the correct `stateId` via `getTeamStates`. Same for labels — `labels: ["bug", "urgent"]` resolves to `labelIds` via `getTeamLabels`. Case-insensitive matching with descriptive errors when names don't match.
+
+The `create` action supports **sub-issue creation** via `parentIssueId`. When provided, the new issue inherits `teamId` and `projectId` from the parent, and the `GraphQL-Features: sub_issues` header is sent automatically. Agents are instructed to decompose large tasks into sub-issues for granular planning and parallel dispatch.
+
+---
+
 ## Testing & Verification
 
 ### Health check
@@ -942,7 +1216,7 @@ This is separate from the main `doctor` because each live test spawns a real CLI
 
 ### Unit tests
 
-532 tests covering the full pipeline — triage, dispatch, audit, planning, intent classification, cross-model review, notifications, and infrastructure:
+551 tests covering the full pipeline — triage, dispatch, audit, planning, intent classification, native issue tools, cross-model review, notifications, and infrastructure:
 
 ```bash
 cd ~/claw-extensions/linear
@@ -1150,6 +1424,7 @@ For detailed diagnostics, see [docs/troubleshooting.md](docs/troubleshooting.md)
 
 - [Architecture](docs/architecture.md) — Internal design, state machines, diagrams
 - [Troubleshooting](docs/troubleshooting.md) — Diagnostic commands, curl examples, log analysis
+- [Agents in Linear](https://linear.app/docs/agents-in-linear) — Linear's agent guidance system (workspace & team-level instructions)
 
 ---
 

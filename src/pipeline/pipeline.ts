@@ -19,6 +19,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
 import { runAgent } from "../agent/agent.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";
+import { getCachedGuidanceForTeam, isGuidanceEnabled } from "./guidance.js";
 import {
   type Tier,
   type DispatchStatus,
@@ -191,7 +192,7 @@ export interface IssueContext {
 export function buildWorkerTask(
   issue: IssueContext,
   worktreePath: string,
-  opts?: { attempt?: number; gaps?: string[]; pluginConfig?: Record<string, unknown> },
+  opts?: { attempt?: number; gaps?: string[]; pluginConfig?: Record<string, unknown>; guidance?: string },
 ): { system: string; task: string } {
   const prompts = loadPrompts(opts?.pluginConfig, worktreePath);
   const vars: Record<string, string> = {
@@ -202,6 +203,9 @@ export function buildWorkerTask(
     tier: "",
     attempt: String(opts?.attempt ?? 0),
     gaps: opts?.gaps?.length ? "- " + opts.gaps.join("\n- ") : "",
+    guidance: opts?.guidance
+      ? `\n---\n## Additional Guidance (from Linear workspace/team settings)\n${opts.guidance.slice(0, 2000)}\n---`
+      : "",
   };
 
   let task = renderTemplate(prompts.worker.task, vars);
@@ -222,6 +226,7 @@ export function buildAuditTask(
   issue: IssueContext,
   worktreePath: string,
   pluginConfig?: Record<string, unknown>,
+  opts?: { guidance?: string },
 ): { system: string; task: string } {
   const prompts = loadPrompts(pluginConfig, worktreePath);
   const vars: Record<string, string> = {
@@ -232,6 +237,9 @@ export function buildAuditTask(
     tier: "",
     attempt: "0",
     gaps: "",
+    guidance: opts?.guidance
+      ? `\n---\n## Additional Guidance (from Linear workspace/team settings)\n${opts.guidance.slice(0, 2000)}\n---`
+      : "",
   };
 
   return {
@@ -350,7 +358,13 @@ export async function triggerAudit(
     ? dispatch.worktrees.map(w => `${w.repoName}: ${w.path}`).join("\n")
     : dispatch.worktreePath;
 
-  const auditPrompt = buildAuditTask(issue, effectiveAuditPath, pluginConfig);
+  // Look up cached guidance for audit
+  const auditTeamId = issueDetails?.team?.id;
+  const auditGuidance = (auditTeamId && isGuidanceEnabled(pluginConfig, auditTeamId))
+    ? getCachedGuidanceForTeam(auditTeamId) ?? undefined
+    : undefined;
+
+  const auditPrompt = buildAuditTask(issue, effectiveAuditPath, pluginConfig, { guidance: auditGuidance });
 
   // Set Linear label
   await linearApi.emitActivity(dispatch.agentSessionId ?? "", {
@@ -744,10 +758,17 @@ export async function spawnWorker(
     ? dispatch.worktrees.map(w => `${w.repoName}: ${w.path}`).join("\n")
     : dispatch.worktreePath;
 
+  // Look up cached guidance for the issue's team
+  const workerTeamId = issueDetails?.team?.id;
+  const workerGuidance = (workerTeamId && isGuidanceEnabled(pluginConfig, workerTeamId))
+    ? getCachedGuidanceForTeam(workerTeamId) ?? undefined
+    : undefined;
+
   const workerPrompt = buildWorkerTask(issue, effectiveWorkerPath, {
     attempt: dispatch.attempt,
     gaps: opts?.gaps,
     pluginConfig,
+    guidance: workerGuidance,
   });
 
   const workerSessionId = `linear-worker-${dispatch.issueIdentifier}-${dispatch.attempt}`;

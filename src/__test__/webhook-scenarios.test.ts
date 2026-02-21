@@ -628,4 +628,154 @@ describe("webhook scenario tests — full handler flows", () => {
       expect(mockGetIssueDetails).not.toHaveBeenCalled();
     });
   });
+
+  describe("Guidance integration", () => {
+    it("created: appends guidance to agent prompt", async () => {
+      const api = createApi();
+      const payload = makeAgentSessionEventCreated({
+        guidance: "Always use the main branch. Run make test before closing.",
+      });
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const runArgs = mockRunAgent.mock.calls[0][0];
+      expect(runArgs.message).toContain("Additional Guidance");
+      expect(runArgs.message).toContain("Always use the main branch");
+    });
+
+    it("created: guidance is NOT used as user message", async () => {
+      const api = createApi();
+      const payload = makeAgentSessionEventCreated({
+        guidance: "Always use the main branch. Run make test before closing.",
+        previousComments: [
+          { body: "Please fix the routing bug", userId: "user-1", createdAt: new Date().toISOString() },
+        ],
+      });
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+
+      // Guidance text should appear in the appendix section, not as the user's comment
+      const userMsgSection = msg.split("Additional Guidance")[0];
+      expect(userMsgSection).toContain("Please fix the routing bug");
+      // The guidance string itself should not appear before the appendix
+      expect(userMsgSection).not.toContain("Always use the main branch");
+    });
+
+    it("prompted: includes guidance from promptContext", async () => {
+      const api = createApi();
+      const payload = makeAgentSessionEventPrompted({
+        agentActivity: { content: { body: "Can you also fix the tests?" } },
+        promptContext: "## Issue\nENG-123\n\n## Guidance\nUse TypeScript strict mode.\n\n## Comments\nThread.",
+      });
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+      expect(msg).toContain("Can you also fix the tests?");
+      expect(msg).toContain("Additional Guidance");
+      expect(msg).toContain("Use TypeScript strict mode");
+    });
+
+    it("guidance disabled via config: no guidance section in prompt", async () => {
+      const api = createApi();
+      (api as any).pluginConfig = { defaultAgentId: "mal", enableGuidance: false };
+      const payload = makeAgentSessionEventCreated({
+        guidance: "Should not appear in prompt",
+      });
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+      expect(msg).not.toContain("Additional Guidance");
+      expect(msg).not.toContain("Should not appear in prompt");
+    });
+
+    it("team override disables guidance for specific team", async () => {
+      const api = createApi();
+      (api as any).pluginConfig = {
+        defaultAgentId: "mal",
+        enableGuidance: true,
+        teamGuidanceOverrides: { "team-1": false },
+      };
+      const payload = makeAgentSessionEventCreated({
+        guidance: "Should be suppressed for team-1",
+      });
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+      expect(msg).not.toContain("Additional Guidance");
+      expect(msg).not.toContain("Should be suppressed");
+    });
+
+    it("comment handler uses cached guidance from prior session event", async () => {
+      // Step 1: Trigger a created event to cache guidance
+      const api = createApi();
+      const sessionPayload = makeAgentSessionEventCreated({
+        guidance: "Cached guidance from session event",
+      });
+      await postWebhook(api, sessionPayload);
+      await waitForMock(mockClearActiveSession);
+
+      // Reset mocks for the next webhook
+      vi.clearAllMocks();
+      mockGetViewerId.mockResolvedValue("viewer-bot-1");
+      mockGetIssueDetails.mockResolvedValue(makeIssueDetails());
+      mockCreateComment.mockResolvedValue("comment-new-id");
+      mockEmitActivity.mockResolvedValue(undefined);
+      mockUpdateSession.mockResolvedValue(undefined);
+      mockUpdateIssue.mockResolvedValue(true);
+      mockCreateSessionOnIssue.mockResolvedValue({ sessionId: "session-mock-2" });
+      mockGetTeamLabels.mockResolvedValue([]);
+      mockGetTeamStates.mockResolvedValue([
+        { id: "st-backlog", name: "Backlog", type: "backlog" },
+        { id: "st-started", name: "In Progress", type: "started" },
+        { id: "st-done", name: "Done", type: "completed" },
+      ]);
+      mockRunAgent.mockResolvedValue({ success: true, output: "Agent response text" });
+      mockClassifyIntent.mockResolvedValue({
+        intent: "ask_agent",
+        agentId: "mal",
+        reasoning: "user requesting help",
+        fromFallback: false,
+      });
+
+      // Step 2: Now send a comment — it should pick up cached guidance
+      const commentPayload = makeCommentCreate({
+        data: {
+          id: "comment-guidance-1",
+          body: "Can you investigate further?",
+          user: { id: "user-human", name: "Human" },
+          issue: {
+            id: "issue-1",
+            identifier: "ENG-123",
+            title: "Fix webhook routing",
+            team: { id: "team-1" },
+            project: null,
+          },
+          createdAt: new Date().toISOString(),
+        },
+      });
+      await postWebhook(api, commentPayload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+      expect(msg).toContain("Additional Guidance");
+      expect(msg).toContain("Cached guidance from session event");
+    });
+  });
 });

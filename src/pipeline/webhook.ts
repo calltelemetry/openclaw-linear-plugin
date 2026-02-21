@@ -16,6 +16,7 @@ import { initiatePlanningSession, handlePlannerTurn, runPlanAudit } from "./plan
 import { startProjectDispatch } from "./dag-dispatch.js";
 import { emitDiagnostic } from "../infra/observability.js";
 import { classifyIntent } from "./intent-classify.js";
+import { extractGuidance, formatGuidanceAppendix, cacheGuidanceForTeam, getCachedGuidanceForTeam, isGuidanceEnabled, _resetGuidanceCacheForTesting } from "./guidance.js";
 
 // ── Agent profiles (loaded from config, no hardcoded names) ───────
 interface AgentProfile {
@@ -101,6 +102,7 @@ export function _resetForTesting(): void {
   profilesCache = null;
   linearApiCache = null;
   lastSweep = Date.now();
+  _resetGuidanceCacheForTesting();
 }
 
 /** @internal — test-only; add an issue ID to the activeRuns set. */
@@ -236,6 +238,8 @@ export async function handleLinearWebhook(
   }
 
   const payload = body.value;
+  const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+
   // Debug: log full payload structure for diagnosing webhook types
   const payloadKeys = Object.keys(payload).join(", ");
   api.logger.info(`Linear webhook received: type=${payload.type} action=${payload.action} keys=[${payloadKeys}]`);
@@ -297,16 +301,15 @@ export async function handleLinearWebhook(
 
     const agentId = resolveAgentId(api);
     const previousComments = payload.previousComments ?? [];
-    const guidance = payload.guidance;
+    const guidanceCtx = extractGuidance(payload);
 
-    api.logger.info(`AgentSession created: ${session.id} for issue ${issue?.identifier ?? issue?.id} (comments: ${previousComments.length}, guidance: ${guidance ? "yes" : "no"})`)
+    api.logger.info(`AgentSession created: ${session.id} for issue ${issue?.identifier ?? issue?.id} (comments: ${previousComments.length}, guidance: ${guidanceCtx.guidance ? "yes" : "no"})`)
 
-    // Extract the user's latest message from previousComments
-    // The last comment is the most recent user message
+    // Extract the user's latest message from previousComments (NOT from guidance)
     const lastComment = previousComments.length > 0
       ? previousComments[previousComments.length - 1]
       : null;
-    const userMessage = lastComment?.body ?? guidance ?? "";
+    const userMessage = lastComment?.body ?? "";
 
     // Fetch full issue details
     let enrichedIssue: any = issue;
@@ -317,6 +320,13 @@ export async function handleLinearWebhook(
     }
 
     const description = enrichedIssue?.description ?? issue?.description ?? "(no description)";
+
+    // Cache guidance for this team (enables Comment webhook paths)
+    const teamId = enrichedIssue?.team?.id;
+    if (guidanceCtx.guidance && teamId) cacheGuidanceForTeam(teamId, guidanceCtx.guidance);
+    const guidanceAppendix = isGuidanceEnabled(pluginConfig as Record<string, unknown> | undefined, teamId)
+      ? formatGuidanceAppendix(guidanceCtx.guidance)
+      : "";
 
     // Build conversation context from previous comments
     const commentContext = previousComments
@@ -331,22 +341,24 @@ export async function handleLinearWebhook(
     const toolAccessLines = isTriaged
       ? [
         `**Tool access:**`,
-        `- \`linearis\` CLI: Full access. You can read, update, close, and comment on issues. Use \`linearis issues update ${issueRef} --state <state>\` to change status, \`linearis issues update ${issueRef} --priority <1-4>\` to set priority, etc.`,
-        `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linearis.`,
+        `- \`linear_issues\` tool: Full access. Use action="read" with issueId="${issueRef}" to get details, action="create" to create issues (with parentIssueId to create sub-issues for granular work breakdown), action="update" with status/priority/labels/estimate to modify issues, action="comment" to post comments, action="list_states" to see available workflow states.`,
+        `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
         `- \`spawn_agent\`/\`ask_agent\`: Delegate to other crew agents.`,
         `- Standard tools: exec, read, edit, write, web_search, etc.`,
+        ``,
+        `**Sub-issue guidance:** When a task is too large or has multiple distinct parts, break it into sub-issues using action="create" with parentIssueId="${issueRef}". Each sub-issue should be an atomic, independently testable unit of work with its own acceptance criteria. This enables parallel dispatch and clearer progress tracking.`,
       ]
       : [
         `**Tool access:**`,
-        `- \`linearis\` CLI: READ ONLY. You can read issues (\`linearis issues read ${issueRef}\`), list issues (\`linearis issues list\`), and search (\`linearis issues search "..."\`). Do NOT use linearis to update, close, comment, or modify issues.`,
-        `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linearis.`,
+        `- \`linear_issues\` tool: READ ONLY. Use action="read" with issueId="${issueRef}" to get details, action="list_states"/"list_labels" for metadata. Do NOT use action="update", action="create", or action="comment".`,
+        `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
         `- \`spawn_agent\`/\`ask_agent\`: Delegate to other crew agents.`,
         `- Standard tools: exec, read, edit, write, web_search, etc.`,
       ];
 
     const roleLines = isTriaged
       ? [`**Your role:** Orchestrator with full Linear access. You can update issue fields, change status, and dispatch work via \`code_run\`. Do NOT post comments yourself — the handler posts your text output.`]
-      : [`**Your role:** You are the dispatcher. For any coding or implementation work, use \`code_run\` to dispatch it. Workers return text output. You summarize results. You do NOT update issue status or post linearis comments — the audit system handles lifecycle transitions.`];
+      : [`**Your role:** You are the dispatcher. For any coding or implementation work, use \`code_run\` to dispatch it. Workers return text output. You summarize results. You do NOT update issue status or post comments via linear_issues — the audit system handles lifecycle transitions.`];
 
     const message = [
       `You are an orchestrator responding in a Linear issue session. Your text output will be posted as activities visible to the user.`,
@@ -364,6 +376,7 @@ export async function handleLinearWebhook(
       userMessage ? `\n**Latest message:**\n> ${userMessage}` : "",
       ``,
       `Respond to the user's request. For work requests, dispatch via \`code_run\` and summarize the result. Be concise and action-oriented.`,
+      guidanceAppendix,
     ].filter(Boolean).join("\n");
 
     // Run agent directly (non-blocking)
@@ -473,13 +486,11 @@ export async function handleLinearWebhook(
       return true;
     }
 
-    // Extract user message from the activity or prompt context
-    const promptContext = payload.promptContext;
+    // Extract user message from the activity (not from promptContext which contains issue data + guidance)
+    const guidanceCtxPrompted = extractGuidance(payload);
     const userMessage =
       activity?.content?.body ??
       activity?.body ??
-      promptContext?.message ??
-      promptContext ??
       "";
 
     if (!userMessage || typeof userMessage !== "string" || userMessage.trim().length === 0) {
@@ -514,6 +525,13 @@ export async function handleLinearWebhook(
 
       const description = enrichedIssue?.description ?? issue?.description ?? "(no description)";
 
+      // Resolve guidance for follow-up
+      const followUpTeamId = enrichedIssue?.team?.id;
+      if (guidanceCtxPrompted.guidance && followUpTeamId) cacheGuidanceForTeam(followUpTeamId, guidanceCtxPrompted.guidance);
+      const followUpGuidanceAppendix = isGuidanceEnabled(pluginConfig as Record<string, unknown> | undefined, followUpTeamId)
+        ? formatGuidanceAppendix(guidanceCtxPrompted.guidance ?? (followUpTeamId ? getCachedGuidanceForTeam(followUpTeamId) : null))
+        : "";
+
       // Build context from recent comments
       const recentComments = enrichedIssue?.comments?.nodes ?? [];
       const commentContext = recentComments
@@ -528,15 +546,17 @@ export async function handleLinearWebhook(
       const followUpToolAccessLines = followUpIsTriaged
         ? [
           `**Tool access:**`,
-          `- \`linearis\` CLI: Full access. You can read, update, close, and comment on issues. Use \`linearis issues update ${followUpIssueRef} --state <state>\` to change status, \`linearis issues update ${followUpIssueRef} --priority <1-4>\` to set priority, etc.`,
-          `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linearis.`,
+          `- \`linear_issues\` tool: Full access. Use action="read" with issueId="${followUpIssueRef}" to get details, action="create" to create issues (with parentIssueId to create sub-issues for granular work breakdown), action="update" with status/priority/labels/estimate to modify issues, action="comment" to post comments, action="list_states" to see available workflow states.`,
+          `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
           `- \`spawn_agent\`/\`ask_agent\`: Delegate to other crew agents.`,
           `- Standard tools: exec, read, edit, write, web_search, etc.`,
+          ``,
+          `**Sub-issue guidance:** When a task is too large or has multiple distinct parts, break it into sub-issues using action="create" with parentIssueId="${followUpIssueRef}". Each sub-issue should be an atomic, independently testable unit of work with its own acceptance criteria. This enables parallel dispatch and clearer progress tracking.`,
         ]
         : [
           `**Tool access:**`,
-          `- \`linearis\` CLI: READ ONLY. You can read issues (\`linearis issues read ${followUpIssueRef}\`), list, and search. Do NOT use linearis to update, close, comment, or modify issues.`,
-          `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linearis.`,
+          `- \`linear_issues\` tool: READ ONLY. Use action="read" with issueId="${followUpIssueRef}" to get details, action="list_states"/"list_labels" for metadata. Do NOT use action="update", action="create", or action="comment".`,
+          `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
           `- \`spawn_agent\`/\`ask_agent\`: Delegate to other crew agents.`,
           `- Standard tools: exec, read, edit, write, web_search, etc.`,
         ];
@@ -561,6 +581,7 @@ export async function handleLinearWebhook(
         `\n**User's follow-up message:**\n> ${userMessage}`,
         ``,
         `Respond to the user's follow-up. For work requests, dispatch via \`code_run\`. Be concise and action-oriented.`,
+        followUpGuidanceAppendix,
       ].filter(Boolean).join("\n");
 
       setActiveSession({
@@ -635,7 +656,6 @@ export async function handleLinearWebhook(
     const commentBody = comment?.body ?? "";
     const commentor = comment?.user?.name ?? "Unknown";
     const issue = comment?.issue ?? payload.issue;
-    const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
 
     if (!issue?.id) {
       api.logger.error("Comment webhook: missing issue data");
@@ -1050,6 +1070,13 @@ export async function handleLinearWebhook(
           ? `**Created by:** ${creatorName} (${creatorEmail})`
           : `**Created by:** ${creatorName}`;
 
+        // Look up cached guidance for triage
+        const triageTeamId = enrichedIssue?.team?.id ?? issue?.team?.id;
+        const triageGuidance = triageTeamId ? getCachedGuidanceForTeam(triageTeamId) : null;
+        const triageGuidanceAppendix = isGuidanceEnabled(pluginConfig as Record<string, unknown> | undefined, triageTeamId)
+          ? formatGuidanceAppendix(triageGuidance)
+          : "";
+
         const message = [
           `IMPORTANT: You are triaging a new Linear issue. You MUST respond with a JSON block containing your triage decisions, followed by your assessment as plain text.`,
           ``,
@@ -1086,6 +1113,7 @@ export async function handleLinearWebhook(
           `IMPORTANT: Only reference real users from the issue data above. Do NOT fabricate or guess user names, emails, or identities. The issue creator is shown in the "Created by" field.`,
           ``,
           `Then write your full assessment as markdown below the JSON block.`,
+          triageGuidanceAppendix,
         ].filter(Boolean).join("\n");
 
         const sessionId = `linear-triage-${issue.id}-${Date.now()}`;
@@ -1237,6 +1265,13 @@ async function dispatchCommentToAgent(
     .map((c: any) => `**${c.user?.name ?? "Unknown"}**: ${(c.body ?? "").slice(0, 200)}`)
     .join("\n");
 
+  // Look up cached guidance for this team (Comment webhooks don't carry guidance)
+  const commentTeamId = enrichedIssue?.team?.id;
+  const cachedGuidance = commentTeamId ? getCachedGuidanceForTeam(commentTeamId) : null;
+  const commentGuidanceAppendix = isGuidanceEnabled(pluginConfig, commentTeamId)
+    ? formatGuidanceAppendix(cachedGuidance)
+    : "";
+
   const issueRef = enrichedIssue?.identifier ?? issue.identifier ?? issue.id;
   const stateType = enrichedIssue?.state?.type ?? "";
   const isTriaged = stateType === "started" || stateType === "completed" || stateType === "canceled";
@@ -1244,14 +1279,16 @@ async function dispatchCommentToAgent(
   const toolAccessLines = isTriaged
     ? [
       `**Tool access:**`,
-      `- \`linearis\` CLI: Full access. You can read, update, close, and comment on issues. Use \`linearis issues update ${issueRef} --state <state>\` to change status, \`linearis issues update ${issueRef} --priority <1-4>\` to set priority, etc.`,
-      `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linearis.`,
+      `- \`linear_issues\` tool: Full access. Use action="read" with issueId="${issueRef}" to get details, action="create" to create issues (with parentIssueId to create sub-issues for granular work breakdown), action="update" with status/priority/labels/estimate to modify issues, action="comment" to post comments, action="list_states" to see available workflow states.`,
+      `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
       `- Standard tools: exec, read, edit, write, web_search, etc.`,
+      ``,
+      `**Sub-issue guidance:** When a task is too large or has multiple distinct parts, break it into sub-issues using action="create" with parentIssueId="${issueRef}". Each sub-issue should be an atomic, independently testable unit of work with its own acceptance criteria. This enables parallel dispatch and clearer progress tracking.`,
     ]
     : [
       `**Tool access:**`,
-      `- \`linearis\` CLI: READ ONLY. You can read issues (\`linearis issues read ${issueRef}\`), list, and search. Do NOT use linearis to update, close, comment, or modify issues.`,
-      `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linearis.`,
+      `- \`linear_issues\` tool: READ ONLY. Use action="read" with issueId="${issueRef}" to get details, action="list_states"/"list_labels" for metadata. Do NOT use action="update", action="create", or action="comment".`,
+      `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
       `- Standard tools: exec, read, edit, write, web_search, etc.`,
     ];
 
@@ -1278,6 +1315,7 @@ async function dispatchCommentToAgent(
     `IMPORTANT: Only reference real users from the issue data above. Do NOT fabricate or guess user names, emails, or identities.`,
     ``,
     `Respond concisely. For work requests, dispatch via \`code_run\` and summarize the result.`,
+    commentGuidanceAppendix,
   ].filter(Boolean).join("\n");
 
   // Dispatch with session lifecycle
@@ -1416,6 +1454,12 @@ async function handleCloseIssue(
     .map((c: any) => `**${c.user?.name ?? "Unknown"}**: ${(c.body ?? "").slice(0, 300)}`)
     .join("\n");
 
+  // Look up cached guidance
+  const closeGuidance = teamId ? getCachedGuidanceForTeam(teamId) : null;
+  const closeGuidanceAppendix = isGuidanceEnabled(pluginConfig, teamId)
+    ? formatGuidanceAppendix(closeGuidance)
+    : "";
+
   const message = [
     `You are writing a closure report for a Linear issue that is being marked as done.`,
     `Your text output will be posted as the closing comment on the issue.`,
@@ -1437,6 +1481,7 @@ async function handleCloseIssue(
     `- **Notes**: Any follow-up items or caveats (if applicable)`,
     ``,
     `Keep it brief and factual. Use markdown formatting.`,
+    closeGuidanceAppendix,
   ].filter(Boolean).join("\n");
 
   // Execute with session lifecycle

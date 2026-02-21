@@ -111,8 +111,14 @@ export function makeAgentSessionEventCreated(overrides?: Record<string, unknown>
         title: "Fix webhook routing",
       },
     },
-    previousComments: [],
-    guidance: "Please investigate this issue",
+    previousComments: [
+      {
+        body: "Please investigate this issue",
+        userId: "user-1",
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    guidance: "Always use the main branch. Run make test before closing.",
     ...overrides,
   };
 }
@@ -133,6 +139,7 @@ export function makeAgentSessionEventPrompted(overrides?: Record<string, unknown
       },
     },
     agentActivity: { content: { body: "Follow-up question here" } },
+    promptContext: "## Issue\nENG-123: Fix webhook routing\n\n## Guidance\nAlways run lint before committing.\n\n## Comments\nSome prior thread.",
     webhookId: "webhook-prompted-1",
     ...overrides,
   };

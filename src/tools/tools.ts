@@ -1,6 +1,7 @@
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createCodeTool } from "./code-tool.js";
 import { createOrchestrationTools } from "./orchestration-tools.js";
+import { createLinearIssuesTool } from "./linear-issues-tool.js";
 
 export function createLinearTools(api: OpenClawPluginApi, ctx: Record<string, unknown>): any[] {
   const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
@@ -24,11 +25,17 @@ export function createLinearTools(api: OpenClawPluginApi, ctx: Record<string, un
     }
   }
 
-  // Linear issue management (list, create, update, close, comment, etc.)
-  // is handled by the `linearis` skill — no custom tools needed here.
+  // Linear issue management — native GraphQL API tool
+  const linearIssuesTools: AnyAgentTool[] = [];
+  try {
+    linearIssuesTools.push(createLinearIssuesTool(api));
+  } catch (err) {
+    api.logger.warn(`linear_issues tool not available: ${err}`);
+  }
 
   return [
     ...codeTools,
     ...orchestrationTools,
+    ...linearIssuesTools,
   ];
 }

@@ -11,7 +11,7 @@ systemctl --user status openclaw-gateway        # Gateway running?
 openclaw openclaw-linear status                  # Token valid?
 openclaw doctor                                  # Config valid?
 journalctl --user -u openclaw-gateway -f         # Live logs
-linearis issues list -l 1                        # linearis auth working?
+openclaw openclaw-linear status                  # Linear auth working?
 openclaw openclaw-linear prompts validate        # Prompts valid?
 ```
 
