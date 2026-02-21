@@ -12,6 +12,7 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - **New issue?** Agent estimates story points, adds labels, sets priority.
 - **Assign to agent?** A worker implements it, an independent auditor verifies it, done.
 - **Comment anything?** The bot understands natural language — no magic commands needed.
+- **Say "close this" or "mark as done"?** Agent writes a closure report and transitions the issue to completed.
 - **Say "let's plan the features"?** A planner interviews you, writes user stories, and builds your full issue hierarchy.
 - **Plan looks good?** A different AI model automatically audits the plan before dispatch.
 - **Agent goes silent?** A watchdog kills it and retries automatically.
@@ -305,6 +306,7 @@ User comment → Intent Classifier (small model, ~2s) → Route to handler
 | "hey kaylee can you look at this?" | Routes to Kaylee (no `@` needed) |
 | "what can I do here?" | Default agent responds (not silently dropped) |
 | "fix the search bug" | Default agent dispatches work |
+| "close this" / "mark as done" / "this is resolved" | Generates closure report, transitions issue to completed |
 
 `@mentions` still work as a fast path — if you write `@kaylee`, the classifier is skipped entirely for speed.
 
@@ -440,6 +442,7 @@ If an issue gets stuck (all retries failed), dependent issues are blocked and yo
 | Comment anything on an issue | Intent classifier routes to the right handler |
 | Mention an agent by name (with or without `@`) | That agent responds |
 | Ask a question or request work | Default agent handles it |
+| Say "close this" / "mark as done" / "this is resolved" | Closure report posted, issue moved to completed |
 | Say "plan this project" (on a project issue) | Planning interview starts |
 | Reply during planning | Issues created/updated with user stories & AC |
 | Say "looks good" / "finalize plan" | Validates → cross-model review → approval |
@@ -903,7 +906,7 @@ Every warning and error includes a `→` line telling you what to do. Run `docto
 
 ### Unit tests
 
-454 tests covering the full pipeline — triage, dispatch, audit, planning, intent classification, cross-model review, notifications, and infrastructure:
+524 tests covering the full pipeline — triage, dispatch, audit, planning, intent classification, cross-model review, notifications, and infrastructure:
 
 ```bash
 cd ~/claw-extensions/linear

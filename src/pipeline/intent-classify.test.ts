@@ -195,6 +195,19 @@ describe("classifyIntent", () => {
     const call = runAgentMock.mock.calls[0][0];
     expect(call.message).not.toContain("x".repeat(501));
   });
+
+  it("parses close_issue intent from LLM response", async () => {
+    runAgentMock.mockResolvedValueOnce({
+      success: true,
+      output: '{"intent":"close_issue","reasoning":"user wants to close the issue"}',
+    });
+
+    const result = await classifyIntent(createApi(), createCtx({ commentBody: "close this" }));
+
+    expect(result.intent).toBe("close_issue");
+    expect(result.reasoning).toBe("user wants to close the issue");
+    expect(result.fromFallback).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -280,6 +293,36 @@ describe("regexFallback", () => {
       }));
       expect(result.intent).toBe("general");
       expect(result.fromFallback).toBe(true);
+    });
+
+    it("detects close_issue for 'close this' pattern", () => {
+      const result = regexFallback(createCtx({
+        commentBody: "close this issue",
+      }));
+      expect(result.intent).toBe("close_issue");
+      expect(result.fromFallback).toBe(true);
+    });
+
+    it("detects close_issue for 'mark as done' pattern", () => {
+      const result = regexFallback(createCtx({
+        commentBody: "mark as done",
+      }));
+      expect(result.intent).toBe("close_issue");
+    });
+
+    it("detects close_issue for 'this is resolved' pattern", () => {
+      const result = regexFallback(createCtx({
+        commentBody: "this is resolved",
+      }));
+      expect(result.intent).toBe("close_issue");
+    });
+
+    it("does NOT detect close_issue for ambiguous text", () => {
+      const result = regexFallback(createCtx({
+        commentBody: "I think this might be resolved soon",
+        agentNames: [],
+      }));
+      expect(result.intent).toBe("general");
     });
   });
 });

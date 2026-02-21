@@ -805,6 +805,14 @@ export async function handleLinearWebhook(
         break;
       }
 
+      case "close_issue": {
+        const closeAgent = resolveAgentId(api);
+        api.logger.info(`Comment intent close_issue: closing ${issue.identifier ?? issue.id} via ${closeAgent}`);
+        void handleCloseIssue(api, linearApi, profiles, closeAgent, issue, comment, commentBody, commentor, pluginConfig)
+          .catch((err) => api.logger.error(`Close issue error: ${err}`));
+        break;
+      }
+
       case "general":
       default:
         api.logger.info(`Comment intent general: no action taken for ${issue.identifier ?? issue.id}`);
@@ -1276,6 +1284,172 @@ async function dispatchCommentToAgent(
       await linearApi.emitActivity(agentSessionId, {
         type: "error",
         body: `Failed to process comment: ${String(err).slice(0, 500)}`,
+      }).catch(() => {});
+    }
+  } finally {
+    clearActiveSession(issue.id);
+    activeRuns.delete(issue.id);
+  }
+}
+
+// ── Close issue handler ──────────────────────────────────────────
+//
+// Triggered by close_issue intent. Generates a closure report via agent,
+// transitions issue to completed state, and posts the report.
+
+async function handleCloseIssue(
+  api: OpenClawPluginApi,
+  linearApi: LinearAgentApi,
+  profiles: Record<string, AgentProfile>,
+  agentId: string,
+  issue: any,
+  comment: any,
+  commentBody: string,
+  commentor: string,
+  pluginConfig?: Record<string, unknown>,
+): Promise<void> {
+  const profile = profiles[agentId];
+  const label = profile?.label ?? agentId;
+  const avatarUrl = profile?.avatarUrl;
+
+  if (activeRuns.has(issue.id)) {
+    api.logger.info(`handleCloseIssue: ${issue.identifier ?? issue.id} has active run — skipping`);
+    return;
+  }
+
+  // Fetch full issue details
+  let enrichedIssue: any = issue;
+  try {
+    enrichedIssue = await linearApi.getIssueDetails(issue.id);
+  } catch (err) {
+    api.logger.warn(`Could not fetch issue details for close: ${err}`);
+  }
+
+  const issueRef = enrichedIssue?.identifier ?? issue.identifier ?? issue.id;
+  const teamId = enrichedIssue?.team?.id ?? issue.team?.id;
+
+  // Find completed state
+  let completedStateId: string | null = null;
+  if (teamId) {
+    try {
+      const states = await linearApi.getTeamStates(teamId);
+      const completedState = states.find((s: any) => s.type === "completed");
+      if (completedState) completedStateId = completedState.id;
+    } catch (err) {
+      api.logger.warn(`Could not fetch team states for close: ${err}`);
+    }
+  }
+
+  // Build closure report prompt
+  const description = enrichedIssue?.description ?? issue?.description ?? "(no description)";
+  const comments = enrichedIssue?.comments?.nodes ?? [];
+  const commentSummary = comments
+    .slice(-10)
+    .map((c: any) => `**${c.user?.name ?? "Unknown"}**: ${(c.body ?? "").slice(0, 300)}`)
+    .join("\n");
+
+  const message = [
+    `You are writing a closure report for a Linear issue that is being marked as done.`,
+    `Your text output will be posted as the closing comment on the issue.`,
+    ``,
+    `## Issue: ${issueRef} — ${enrichedIssue?.title ?? issue.title ?? "(untitled)"}`,
+    `**Status:** ${enrichedIssue?.state?.name ?? "Unknown"} | **Assignee:** ${enrichedIssue?.assignee?.name ?? "Unassigned"}`,
+    ``,
+    `**Description:**`,
+    description,
+    commentSummary ? `\n**Comment history:**\n${commentSummary}` : "",
+    `\n**${commentor} says (closure request):**\n> ${commentBody}`,
+    ``,
+    `Write a concise closure report with:`,
+    `- **Summary**: What was done (1-2 sentences)`,
+    `- **Resolution**: How it was resolved`,
+    `- **Notes**: Any follow-up items or caveats (if applicable)`,
+    ``,
+    `Keep it brief and factual. Use markdown formatting.`,
+  ].filter(Boolean).join("\n");
+
+  // Execute with session lifecycle
+  activeRuns.add(issue.id);
+  let agentSessionId: string | null = null;
+
+  try {
+    const sessionResult = await linearApi.createSessionOnIssue(issue.id);
+    agentSessionId = sessionResult.sessionId;
+    if (agentSessionId) {
+      wasRecentlyProcessed(`session:${agentSessionId}`);
+      setActiveSession({
+        agentSessionId,
+        issueIdentifier: issueRef,
+        issueId: issue.id,
+        agentId,
+        startedAt: Date.now(),
+      });
+    }
+
+    if (agentSessionId) {
+      await linearApi.emitActivity(agentSessionId, {
+        type: "thought",
+        body: `${label} is preparing closure report for ${issueRef}...`,
+      }).catch(() => {});
+    }
+
+    // Run agent for closure report
+    const { runAgent } = await import("../agent/agent.js");
+    const result = await runAgent({
+      api,
+      agentId,
+      sessionId: `linear-close-${agentId}-${Date.now()}`,
+      message,
+      timeoutMs: 2 * 60_000,
+      readOnly: true,
+    });
+
+    const closureReport = result.success
+      ? result.output
+      : "Issue closed. (Closure report generation failed.)";
+
+    const fullReport = `## Closure Report\n\n${closureReport}`;
+
+    // Transition issue to completed state
+    if (completedStateId) {
+      try {
+        await linearApi.updateIssue(issue.id, { stateId: completedStateId });
+        api.logger.info(`Closed issue ${issueRef} (state → completed)`);
+      } catch (err) {
+        api.logger.error(`Failed to transition issue ${issueRef} to completed: ${err}`);
+      }
+    } else {
+      api.logger.warn(`No completed state found for ${issueRef} — posting report without state change`);
+    }
+
+    // Post closure report via emitActivity-first pattern
+    if (agentSessionId) {
+      const labeledReport = `**[${label}]** ${fullReport}`;
+      const emitted = await linearApi.emitActivity(agentSessionId, {
+        type: "response",
+        body: labeledReport,
+      }).then(() => true).catch(() => false);
+
+      if (!emitted) {
+        const agentOpts = avatarUrl
+          ? { createAsUser: label, displayIconUrl: avatarUrl }
+          : undefined;
+        await postAgentComment(api, linearApi, issue.id, fullReport, label, agentOpts);
+      }
+    } else {
+      const agentOpts = avatarUrl
+        ? { createAsUser: label, displayIconUrl: avatarUrl }
+        : undefined;
+      await postAgentComment(api, linearApi, issue.id, fullReport, label, agentOpts);
+    }
+
+    api.logger.info(`Posted closure report for ${issueRef}`);
+  } catch (err) {
+    api.logger.error(`handleCloseIssue error: ${err}`);
+    if (agentSessionId) {
+      await linearApi.emitActivity(agentSessionId, {
+        type: "error",
+        body: `Failed to close issue: ${String(err).slice(0, 500)}`,
       }).catch(() => {});
     }
   } finally {

@@ -28,6 +28,7 @@ const {
   mockUpdateSession,
   mockUpdateIssue,
   mockGetTeamLabels,
+  mockGetTeamStates,
   mockCreateSessionOnIssue,
   mockClassifyIntent,
   mockSpawnWorker,
@@ -43,6 +44,7 @@ const {
   mockUpdateSession: vi.fn(),
   mockUpdateIssue: vi.fn(),
   mockGetTeamLabels: vi.fn(),
+  mockGetTeamStates: vi.fn(),
   mockCreateSessionOnIssue: vi.fn(),
   mockClassifyIntent: vi.fn(),
   mockSpawnWorker: vi.fn(),
@@ -66,6 +68,7 @@ vi.mock("../api/linear-api.js", () => ({
     getViewerId = mockGetViewerId;
     updateIssue = mockUpdateIssue;
     getTeamLabels = mockGetTeamLabels;
+    getTeamStates = mockGetTeamStates;
     createSessionOnIssue = mockCreateSessionOnIssue;
   },
   resolveLinearToken: vi.fn().mockReturnValue({
@@ -264,6 +267,12 @@ beforeEach(() => {
   mockGetTeamLabels.mockResolvedValue([
     { id: "label-bug", name: "Bug" },
     { id: "label-feature", name: "Feature" },
+  ]);
+  mockGetTeamStates.mockResolvedValue([
+    { id: "st-backlog", name: "Backlog", type: "backlog" },
+    { id: "st-started", name: "In Progress", type: "started" },
+    { id: "st-done", name: "Done", type: "completed" },
+    { id: "st-canceled", name: "Canceled", type: "canceled" },
   ]);
   mockRunAgent.mockResolvedValue({ success: true, output: "Agent response text" });
   mockSpawnWorker.mockResolvedValue(undefined);
@@ -486,6 +495,58 @@ describe("webhook scenario tests — full handler flows", () => {
       const logs = infoLogs(api);
       expect(logs.some((l) => l.includes("no action taken"))).toBe(true);
       expect(mockRunAgent).not.toHaveBeenCalled();
+    });
+
+    it("close_issue intent: generates closure report, transitions state, posts comment", async () => {
+      mockClassifyIntent.mockResolvedValue({
+        intent: "close_issue",
+        reasoning: "user wants to close the issue",
+        fromFallback: false,
+      });
+
+      mockRunAgent.mockResolvedValueOnce({
+        success: true,
+        output: "**Summary**: Fixed the authentication bug.\n**Resolution**: Updated token refresh logic.",
+      });
+
+      const api = createApi();
+      const payload = makeCommentCreate({
+        data: {
+          id: "comment-close-1",
+          body: "close this issue",
+          user: { id: "user-human", name: "Human" },
+          issue: {
+            id: "issue-close-1",
+            identifier: "ENG-400",
+            title: "Auth bug fix",
+            team: { id: "team-1" },
+            project: null,
+          },
+          createdAt: new Date().toISOString(),
+        },
+      });
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      // Agent ran with readOnly for closure report
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const runArgs = mockRunAgent.mock.calls[0][0];
+      expect(runArgs.readOnly).toBe(true);
+      expect(runArgs.message).toContain("closure report");
+
+      // Issue state transitioned to completed
+      expect(mockUpdateIssue).toHaveBeenCalledWith("issue-close-1", { stateId: "st-done" });
+
+      // Team states fetched to find completed state
+      expect(mockGetTeamStates).toHaveBeenCalledWith("team-1");
+
+      // Closure report posted via emitActivity
+      const responseCalls = activityCallsOfType("response");
+      expect(responseCalls.length).toBeGreaterThan(0);
+      const reportBody = (responseCalls[0][1] as any).body;
+      expect(reportBody).toContain("Closure Report");
+      expect(reportBody).toContain("authentication bug");
     });
   });
 

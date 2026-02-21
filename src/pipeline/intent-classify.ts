@@ -23,6 +23,7 @@ export type Intent =
   | "ask_agent"
   | "request_work"
   | "question"
+  | "close_issue"
   | "general";
 
 export interface IntentResult {
@@ -55,6 +56,7 @@ const VALID_INTENTS: Set<string> = new Set([
   "ask_agent",
   "request_work",
   "question",
+  "close_issue",
   "general",
 ]);
 
@@ -72,12 +74,14 @@ Intents:
 - ask_agent: user is addressing a specific agent by name
 - request_work: user wants something built, fixed, or implemented
 - question: user asking for information or help
+- close_issue: user wants to close/complete/resolve the issue (e.g. "close this", "mark as done", "resolved")
 - general: none of the above, automated messages, or noise
 
 Rules:
 - plan_start ONLY if the issue belongs to a project (hasProject=true)
 - If planning mode is active and no clear finalize/abandon intent, default to plan_continue
 - For ask_agent, set agentId to the matching name from Available agents
+- close_issue only for explicit closure requests, NOT ambiguous comments about resolution
 - One sentence reasoning`;
 
 // ---------------------------------------------------------------------------
@@ -188,6 +192,7 @@ function parseIntentResponse(raw: string, ctx: IntentContext): IntentResult | nu
 const PLAN_START_PATTERN = /\b(plan|planning)\s+(this\s+)(project|out)\b|\bplan\s+this\s+out\b/i;
 const FINALIZE_PATTERN = /\b(finalize\s+(the\s+)?plan\b|done\s+planning\b(?!\s+\w)|approve\s+(the\s+)?plan\b|plan\s+looks\s+good\b|ready\s+to\s+finalize\b|let'?s\s+finalize\b)/i;
 const ABANDON_PATTERN = /\b(abandon\s+plan(ning)?|cancel\s+plan(ning)?|stop\s+planning|exit\s+planning|quit\s+planning)\b/i;
+const CLOSE_ISSUE_PATTERN = /\b(close\s+(this|the\s+issue)|mark\s+(as\s+)?(done|completed?|resolved)|this\s+is\s+(done|resolved|completed?)|resolve\s+(this|the\s+issue))\b/i;
 
 export function regexFallback(ctx: IntentContext): IntentResult {
   const text = ctx.commentBody;
@@ -207,6 +212,11 @@ export function regexFallback(ctx: IntentContext): IntentResult {
   // Plan start (only if issue has a project)
   if (ctx.hasProject && PLAN_START_PATTERN.test(text)) {
     return { intent: "plan_start", reasoning: "regex: plan start pattern matched", fromFallback: true };
+  }
+
+  // Close issue detection
+  if (CLOSE_ISSUE_PATTERN.test(text)) {
+    return { intent: "close_issue", reasoning: "regex: close issue pattern matched", fromFallback: true };
   }
 
   // Agent name detection
