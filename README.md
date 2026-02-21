@@ -12,6 +12,34 @@
 
 Connect Linear to AI agents. Issues get triaged, implemented, and audited — automatically.
 
+> **Real human here.** I'm actively building this and beta testing it on real projects.
+> Looking for feedback, bug reports, and fellow mad scientists.
+> [Open an issue](https://github.com/calltelemetry/openclaw-linear-plugin/issues) or reach out on Discord.
+
+### Project Status
+
+- [x] Cloudflare tunnel setup (webhook ingress, no inbound ports)
+- [x] Linear workspace webhook sync (Comment + Issue events)
+- [x] Linear OAuth app webhook (AgentSessionEvent created/prompted)
+- [x] Linear API integration (issues, comments, labels, state transitions)
+- [x] Agent routing (`@mentions`, natural language intent classifier)
+- [x] Auto-triage (story points, labels, priority — read-only)
+- [x] Complexity-tier dispatch (small → Haiku, medium → Sonnet, high → Opus)
+- [x] Isolated git worktrees per dispatch
+- [x] Worker → Auditor pipeline (hard-enforced, not LLM-mediated)
+- [x] Audit rework loop (gaps fed back, automatic retry)
+- [x] Watchdog timeout + escalation
+- [x] Webhook deduplication (60s sliding window across session/comment/assignment)
+- [x] Multi-repo worktree support
+- [x] Project planner (interview → user stories → sub-issues → DAG dispatch)
+- [x] Cross-model plan review (Claude ↔ Codex ↔ Gemini)
+- [x] Issue closure with summary report
+- [x] Sub-issue decomposition (orchestrator-level only)
+- [x] `spawn_agent` / `ask_agent` sub-agent tools
+- [ ] **Worktree → PR merge** — `createPullRequest()` exists but is not wired into the pipeline. After audit pass, commits sit on a `codex/{identifier}` branch. You create the PR manually.
+- [ ] **Sub-agent worktree sharing** — Sub-agents spawned via `spawn_agent`/`ask_agent` do not inherit the parent worktree. They run in their own session without code access.
+- [ ] **Parallel worktree conflict resolution** — DAG dispatch runs up to 3 issues concurrently in separate worktrees, but there's no merge conflict detection across them.
+
 ---
 
 ## Why This Exists
