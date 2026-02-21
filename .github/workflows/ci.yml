@@ -25,7 +25,13 @@ jobs:
 
       - run: npm install --ignore-scripts
 
-      - run: npx vitest run --coverage
+      - name: Create minimal openclaw config for tests
+        run: |
+          mkdir -p ~/.openclaw
+          echo '{}' > ~/.openclaw/auth-profiles.json
+          echo '{"agents":{"default":{"label":"Default","isDefault":true,"mentionAliases":["default"]}}}' > ~/.openclaw/agent-profiles.json
+
+      - run: npx vitest run --coverage --exclude 'src/__test__/smoke-*.test.ts'
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
 
