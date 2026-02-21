@@ -35,7 +35,7 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - [ ] Cross-model plan review (Claude ↔ Codex ↔ Gemini)
 - [ ] Issue closure with summary report
 - [ ] Sub-issue decomposition (orchestrator-level only)
-- [ ] `spawn_agent` / `ask_agent` sub-agent tools
+- [x] `spawn_agent` / `ask_agent` sub-agent tools
 - [ ] **Worktree → PR merge** — `createPullRequest()` exists but is not wired into the pipeline. After audit pass, commits sit on a `codex/{identifier}` branch. You create the PR manually.
 - [ ] **Sub-agent worktree sharing** — Sub-agents spawned via `spawn_agent`/`ask_agent` do not inherit the parent worktree. They run in their own session without code access.
 - [ ] **Parallel worktree conflict resolution** — DAG dispatch runs up to 3 issues concurrently in separate worktrees, but there's no merge conflict detection across them.
