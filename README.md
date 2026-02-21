@@ -118,7 +118,7 @@ Every issue moves through a clear pipeline. Here's exactly what happens at each 
 
 **Trigger:** You create a new issue.
 
-The agent reads your issue, estimates story points, adds labels, sets priority, and posts an assessment comment — all within seconds.
+The agent reads your issue, estimates story points, adds labels, sets priority, and posts an assessment comment — all within seconds. Triage runs in **read-only mode** (no file writes, no code execution) to prevent side effects.
 
 **What you'll see in Linear:**
 
@@ -327,7 +327,11 @@ The webhook handler prevents double-processing through a two-tier guard system:
 | `Issue.create` | `issue-create:<issueId>` | wasRecentlyProcessed → activeRuns → planning mode → bot-created |
 | `AppUserNotification` | *(immediate discard)* | — |
 
-**Comment echo prevention:** All comments posted by the handler use `createCommentWithDedup()`, which pre-registers the comment's ID in `wasRecentlyProcessed` immediately after the API returns. When Linear echoes the `Comment.create` webhook back, it's caught before any processing.
+`AppUserNotification` events are discarded because they duplicate events already received via the workspace webhook (e.g., `Comment.create` for mentions, `Issue.update` for assignments). Processing both would cause double agent runs.
+
+**Response delivery:** When an agent session exists, responses are delivered via `emitActivity(type: "response")` — not `createComment`. This prevents duplicate visible messages on the issue. `createComment` is only used as a fallback when `emitActivity` fails or when no agent session exists.
+
+**Comment echo prevention:** Comments posted outside of sessions use `createCommentWithDedup()`, which pre-registers the comment's ID in `wasRecentlyProcessed` immediately after the API returns. When Linear echoes the `Comment.create` webhook back, it's caught before any processing.
 
 ---
 
