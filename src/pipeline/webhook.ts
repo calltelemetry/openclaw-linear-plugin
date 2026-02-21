@@ -299,17 +299,33 @@ export async function handleLinearWebhook(
       return true;
     }
 
-    const agentId = resolveAgentId(api);
     const previousComments = payload.previousComments ?? [];
     const guidanceCtx = extractGuidance(payload);
-
-    api.logger.info(`AgentSession created: ${session.id} for issue ${issue?.identifier ?? issue?.id} (comments: ${previousComments.length}, guidance: ${guidanceCtx.guidance ? "yes" : "no"})`)
 
     // Extract the user's latest message from previousComments (NOT from guidance)
     const lastComment = previousComments.length > 0
       ? previousComments[previousComments.length - 1]
       : null;
     const userMessage = lastComment?.body ?? "";
+
+    // Route to the mentioned agent if the user's message contains an @mention.
+    // AgentSessionEvent doesn't carry mention routing — we must check manually.
+    const profiles = loadAgentProfiles();
+    const mentionPattern = buildMentionPattern(profiles);
+    let agentId = resolveAgentId(api);
+    if (mentionPattern && userMessage) {
+      const mentionMatch = userMessage.match(mentionPattern);
+      if (mentionMatch) {
+        const alias = mentionMatch[1];
+        const resolved = resolveAgentFromAlias(alias, profiles);
+        if (resolved) {
+          api.logger.info(`AgentSession routed to ${resolved.agentId} via @${alias} mention`);
+          agentId = resolved.agentId;
+        }
+      }
+    }
+
+    api.logger.info(`AgentSession created: ${session.id} for issue ${issue?.identifier ?? issue?.id} agent=${agentId} (comments: ${previousComments.length}, guidance: ${guidanceCtx.guidance ? "yes" : "no"})`);
 
     // Fetch full issue details
     let enrichedIssue: any = issue;
@@ -504,9 +520,23 @@ export async function handleLinearWebhook(
       return true;
     }
 
-    api.logger.info(`AgentSession prompted (follow-up): ${session.id} issue=${issue?.identifier ?? issue?.id} message="${userMessage.slice(0, 80)}..."`);
+    // Route to mentioned agent if user's message contains an @mention (one-time detour)
+    const promptedProfiles = loadAgentProfiles();
+    const promptedMentionPattern = buildMentionPattern(promptedProfiles);
+    let agentId = resolveAgentId(api);
+    if (promptedMentionPattern && userMessage) {
+      const mentionMatch = userMessage.match(promptedMentionPattern);
+      if (mentionMatch) {
+        const alias = mentionMatch[1];
+        const resolved = resolveAgentFromAlias(alias, promptedProfiles);
+        if (resolved) {
+          api.logger.info(`AgentSession prompted: routed to ${resolved.agentId} via @${alias} mention`);
+          agentId = resolved.agentId;
+        }
+      }
+    }
 
-    const agentId = resolveAgentId(api);
+    api.logger.info(`AgentSession prompted (follow-up): ${session.id} issue=${issue?.identifier ?? issue?.id} agent=${agentId} message="${userMessage.slice(0, 80)}..."`);
 
     // Run agent for follow-up (non-blocking)
     activeRuns.add(issue.id);
