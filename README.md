@@ -549,11 +549,42 @@ flowchart LR
 >
 > **Summary:** The search API endpoint was implemented with pagination, input validation, and error handling. All 14 tests pass. The frontend search page renders results correctly.
 
-### Timeout recovery
+### Watchdog & timeout recovery
 
-If an agent produces no output for 2 minutes (configurable), the watchdog kills it and retries once. If the retry also times out, the issue is escalated.
+Every running agent has an inactivity watchdog. If the agent goes silent — no text, no tool calls, no thinking — the watchdog kills it.
 
-**Notification:** `⚡ ENG-100 timed out (no activity for 120s). Will retry.`
+```
+Agent runs ─────────── output ──→ timer resets (120s default)
+                       output ──→ timer resets
+                       ...
+                       silence ─→ 120s passes ─→ KILL
+                                                   │
+                                          ┌────────┴────────┐
+                                          ▼                 ▼
+                                    Retry (auto)     Already retried?
+                                          │                 │
+                                          ▼                 ▼
+                                    Agent runs again   STUCK → you're notified
+```
+
+**What resets the timer:** any agent output — partial text, tool call start/result, reasoning stream, or error.
+
+**What triggers a kill:** LLM hangs, API timeouts, CLI lockups, rate limiting — anything that causes the agent to stop producing output.
+
+**After a kill:**
+1. First timeout → automatic retry (new attempt, same worktree)
+2. Second timeout → dispatch transitions to `stuck`, Linear comment posted with remediation steps, you get a notification
+
+**The "Agent Timed Out" comment includes:**
+- `/dispatch retry ENG-100` command to try again
+- Suggestion to break the issue into smaller pieces
+- How to increase `inactivitySec` in agent profiles
+- Path to `.claw/log.jsonl` for debugging
+
+**Configure per agent** in `~/.openclaw/agent-profiles.json`:
+```json
+{ "agents": { "mal": { "watchdog": { "inactivitySec": 180 } } } }
+```
 
 ### Project-level progress
 
