@@ -457,12 +457,17 @@ export async function handleLinearWebhook(
       ? [`**Your role:** Orchestrator with full Linear access. You can update issue fields, change status, and dispatch work via \`code_run\`. Do NOT post comments yourself — the handler posts your text output.`]
       : [`**Your role:** You are the dispatcher. For any coding or implementation work, use \`code_run\` to dispatch it. Workers return text output. You summarize results. You do NOT update issue status or post comments via linear_issues — the audit system handles lifecycle transitions.`];
 
+    if (guidanceAppendix) {
+      api.logger.info(`Guidance injected (${guidanceCtx.source}): ${guidanceCtx.guidance?.slice(0, 120)}...`);
+    }
+
     const message = [
       `You are an orchestrator responding in a Linear issue session. Your text output will be posted as activities visible to the user.`,
       ``,
       ...toolAccessLines,
       ``,
       ...roleLines,
+      guidanceAppendix ? `\n${guidanceAppendix}` : "",
       ``,
       `## Issue: ${issueRef} — ${enrichedIssue?.title ?? issue.title ?? "(untitled)"}`,
       `**Status:** ${enrichedIssue?.state?.name ?? "Unknown"} | **Assignee:** ${enrichedIssue?.assignee?.name ?? "Unassigned"}`,
@@ -473,7 +478,6 @@ export async function handleLinearWebhook(
       userMessage ? `\n**Latest message:**\n> ${userMessage}` : "",
       ``,
       `Respond to the user's request. For work requests, dispatch via \`code_run\` and summarize the result. Be concise and action-oriented.`,
-      guidanceAppendix,
     ].filter(Boolean).join("\n");
 
     // Run agent directly (non-blocking)
@@ -697,12 +701,17 @@ export async function handleLinearWebhook(
         ? [`**Your role:** Orchestrator with full Linear access. You can update issue fields, change status, and dispatch work via \`code_run\`. Do NOT post comments yourself — the handler posts your text output.`]
         : [`**Your role:** Dispatcher. For work requests, use \`code_run\`. You do NOT update issue status — the audit system handles lifecycle.`];
 
+      if (followUpGuidanceAppendix) {
+        api.logger.info(`Follow-up guidance injected: ${(guidanceCtxPrompted.guidance ?? "cached").slice(0, 120)}...`);
+      }
+
       const message = [
         `You are an orchestrator responding in a Linear issue session. Your text output will be posted as activities visible to the user.`,
         ``,
         ...followUpToolAccessLines,
         ``,
         ...followUpRoleLines,
+        followUpGuidanceAppendix ? `\n${followUpGuidanceAppendix}` : "",
         ``,
         `## Issue: ${followUpIssueRef} — ${enrichedIssue?.title ?? issue.title ?? "(untitled)"}`,
         `**Status:** ${enrichedIssue?.state?.name ?? "Unknown"} | **Assignee:** ${enrichedIssue?.assignee?.name ?? "Unassigned"}`,
@@ -713,7 +722,6 @@ export async function handleLinearWebhook(
         `\n**User's follow-up message:**\n> ${userMessage}`,
         ``,
         `Respond to the user's follow-up. For work requests, dispatch via \`code_run\`. Be concise and action-oriented.`,
-        followUpGuidanceAppendix,
       ].filter(Boolean).join("\n");
 
       setActiveSession({

@@ -5,8 +5,8 @@
  * resolveAgentFromAlias() implementations that were previously in
  * webhook.ts, intent-classify.ts, and tier-assess.ts.
  */
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ export interface AgentProfile {
 // Cached profile loader (5s TTL)
 // ---------------------------------------------------------------------------
 
-const PROFILES_PATH = join(homedir(), ".openclaw", "agent-profiles.json");
+export const PROFILES_PATH = join(homedir(), ".openclaw", "agent-profiles.json");
 
 let profilesCache: { data: Record<string, AgentProfile>; loadedAt: number } | null = null;
 const PROFILES_CACHE_TTL_MS = 5_000;
@@ -137,7 +137,7 @@ export function validateProfiles(): string | null {
       `EOF\n` +
       "```\n\n" +
       `Then restart the gateway: \`systemctl --user restart openclaw-gateway\`\n\n` +
-      `Run \`openclaw openclaw-linear doctor\` to verify your setup.`
+      `Or run the guided setup: \`openclaw openclaw-linear setup\``
     );
   }
 
@@ -158,11 +158,43 @@ export function validateProfiles(): string | null {
     return (
       `**Critical setup error:** \`agent-profiles.json\` has no agents configured.\n\n` +
       `Add at least one agent entry to the \`"agents"\` object in \`${PROFILES_PATH}\`.\n` +
-      `Run \`openclaw openclaw-linear doctor\` for a guided setup check.`
+      `Run \`openclaw openclaw-linear setup\` for guided setup.`
     );
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Profile creation (setup wizard / doctor --fix)
+// ---------------------------------------------------------------------------
+
+export interface CreateProfileOpts {
+  agentId: string;
+  label: string;
+  mentionAliases: string[];
+  mission?: string;
+}
+
+/**
+ * Create `agent-profiles.json` with a single default agent.
+ * Creates the parent directory if needed. Throws on write failure.
+ */
+export function createAgentProfilesFile(opts: CreateProfileOpts): void {
+  const data = {
+    agents: {
+      [opts.agentId]: {
+        label: opts.label,
+        mission: opts.mission ?? "AI assistant for Linear issues",
+        isDefault: true,
+        mentionAliases: opts.mentionAliases,
+      },
+    },
+  };
+  mkdirSync(dirname(PROFILES_PATH), { recursive: true });
+  writeFileSync(PROFILES_PATH, JSON.stringify(data, null, 2) + "\n", "utf8");
+  // Bust the cache so the next load picks up the new file
+  profilesCache = null;
 }
 
 // ---------------------------------------------------------------------------

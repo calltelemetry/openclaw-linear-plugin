@@ -93,7 +93,7 @@ describe("extractGuidanceFromPromptContext", () => {
 describe("formatGuidanceAppendix", () => {
   it("formats guidance as appendix block", () => {
     const result = formatGuidanceAppendix("Use main branch.");
-    expect(result).toContain("## Additional Guidance");
+    expect(result).toContain("## IMPORTANT — Workspace Guidance");
     expect(result).toContain("Use main branch.");
     expect(result).toMatch(/^---\n/);
     expect(result).toMatch(/\n---$/);

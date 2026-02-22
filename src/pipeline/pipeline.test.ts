@@ -405,7 +405,7 @@ describe("buildWorkerTask (additional branches)", () => {
     const { task } = buildWorkerTask(issue, "/wt/API-42", {
       guidance: "Always use TypeScript strict mode",
     });
-    expect(task).toContain("Additional Guidance");
+    expect(task).toContain("Workspace Guidance");
     expect(task).toContain("Always use TypeScript strict mode");
   });
 
@@ -413,7 +413,7 @@ describe("buildWorkerTask (additional branches)", () => {
     const { task } = buildWorkerTask(issue, "/wt/API-42", {
       guidance: undefined,
     });
-    expect(task).not.toContain("Additional Guidance");
+    expect(task).not.toContain("Workspace Guidance");
   });
 
   it("uses undefined description as (no description)", () => {
@@ -443,7 +443,7 @@ describe("buildAuditTask (additional branches)", () => {
     const { task } = buildAuditTask(issue, "/wt/API-99", undefined, {
       guidance: "Focus on security",
     });
-    expect(task).toContain("Additional Guidance");
+    expect(task).toContain("Workspace Guidance");
     expect(task).toContain("Focus on security");
   });
 
@@ -451,7 +451,7 @@ describe("buildAuditTask (additional branches)", () => {
     const { task } = buildAuditTask(issue, "/wt/API-99", undefined, {
       guidance: undefined,
     });
-    expect(task).not.toContain("Additional Guidance");
+    expect(task).not.toContain("Workspace Guidance");
   });
 
   it("handles undefined description", () => {

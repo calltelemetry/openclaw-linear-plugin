@@ -119,7 +119,9 @@ export function formatGuidanceAppendix(guidance: string | null): string {
   const trimmed = guidance.trim().slice(0, MAX_GUIDANCE_CHARS);
   return [
     `---`,
-    `## Additional Guidance (from Linear workspace/team settings)`,
+    `## IMPORTANT — Workspace Guidance (MUST follow)`,
+    `The workspace owner has set the following mandatory instructions. You MUST incorporate these into your response:`,
+    ``,
     trimmed,
     `---`,
   ].join("\n");

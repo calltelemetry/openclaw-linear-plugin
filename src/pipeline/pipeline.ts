@@ -197,7 +197,7 @@ export function buildWorkerTask(
     attempt: String(opts?.attempt ?? 0),
     gaps: opts?.gaps?.length ? "- " + opts.gaps.join("\n- ") : "",
     guidance: opts?.guidance
-      ? `\n---\n## Additional Guidance (from Linear workspace/team settings)\n${opts.guidance.slice(0, 2000)}\n---`
+      ? `\n---\n## IMPORTANT — Workspace Guidance (MUST follow)\nThe workspace owner has set the following mandatory instructions. You MUST incorporate these into your response:\n\n${opts.guidance.slice(0, 2000)}\n---`
       : "",
   };
 
@@ -231,7 +231,7 @@ export function buildAuditTask(
     attempt: "0",
     gaps: "",
     guidance: opts?.guidance
-      ? `\n---\n## Additional Guidance (from Linear workspace/team settings)\n${opts.guidance.slice(0, 2000)}\n---`
+      ? `\n---\n## IMPORTANT — Workspace Guidance (MUST follow)\nThe workspace owner has set the following mandatory instructions. You MUST incorporate these into your response:\n\n${opts.guidance.slice(0, 2000)}\n---`
       : "",
   };
 

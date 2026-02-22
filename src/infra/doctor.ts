@@ -14,6 +14,7 @@ import { loadPrompts, clearPromptCache } from "../pipeline/pipeline.js";
 import { listWorktrees } from "./codex-worktree.js";
 import { loadCodingConfig, resolveCodingBackend, type CodingBackend } from "../tools/code-tool.js";
 import { getWebhookStatus, provisionWebhook, REQUIRED_RESOURCE_TYPES } from "./webhook-provision.js";
+import { createAgentProfilesFile } from "./shared-profiles.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -227,22 +228,51 @@ export async function checkAuth(pluginConfig?: Record<string, unknown>): Promise
 // Section 2: Agent Configuration
 // ---------------------------------------------------------------------------
 
-export function checkAgentConfig(pluginConfig?: Record<string, unknown>): CheckResult[] {
+export function checkAgentConfig(pluginConfig?: Record<string, unknown>, fix = false): CheckResult[] {
   const checks: CheckResult[] = [];
 
   // Load profiles
   let profiles: Record<string, AgentProfile>;
   try {
     if (!existsSync(AGENT_PROFILES_PATH)) {
-      checks.push(fail(
-        "agent-profiles.json not found",
-        `Expected at: ${AGENT_PROFILES_PATH}`,
-      ));
-      return checks;
+      if (fix) {
+        try {
+          createAgentProfilesFile({
+            agentId: "my-agent",
+            label: "My Agent",
+            mentionAliases: ["my-agent"],
+          });
+          checks.push(pass('agent-profiles.json created with default "my-agent" profile (--fix)'));
+          checks.push(warn(
+            'Customize your agent profile',
+            undefined,
+            { fix: `Edit ${AGENT_PROFILES_PATH} to set your agent's name and aliases, or run: openclaw openclaw-linear setup` },
+          ));
+          // Reload after creation
+          const raw = readFileSync(AGENT_PROFILES_PATH, "utf8");
+          profiles = JSON.parse(raw).agents ?? {};
+          // Continue to remaining checks below
+        } catch (err) {
+          checks.push(fail(
+            "Failed to create agent-profiles.json",
+            err instanceof Error ? err.message : String(err),
+            "Run: openclaw openclaw-linear setup",
+          ));
+          return checks;
+        }
+      } else {
+        checks.push(fail(
+          "agent-profiles.json not found",
+          `Expected at: ${AGENT_PROFILES_PATH}`,
+          "Run: openclaw openclaw-linear setup",
+        ));
+        return checks;
+      }
+    } else {
+      const raw = readFileSync(AGENT_PROFILES_PATH, "utf8");
+      const parsed = JSON.parse(raw);
+      profiles = parsed.agents ?? {};
     }
-    const raw = readFileSync(AGENT_PROFILES_PATH, "utf8");
-    const parsed = JSON.parse(raw);
-    profiles = parsed.agents ?? {};
   } catch (err) {
     checks.push(fail(
       "agent-profiles.json invalid JSON",
@@ -730,7 +760,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   sections.push({ name: "Authentication & Tokens", checks: auth.checks });
 
   // 2. Agent config
-  sections.push({ name: "Agent Configuration", checks: checkAgentConfig(opts.pluginConfig) });
+  sections.push({ name: "Agent Configuration", checks: checkAgentConfig(opts.pluginConfig, opts.fix) });
 
   // 3. Coding tools
   sections.push({ name: "Coding Tools", checks: checkCodingTools(opts.pluginConfig) });

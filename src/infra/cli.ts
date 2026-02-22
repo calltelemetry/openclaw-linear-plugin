@@ -13,6 +13,7 @@ import { validateRepoPath } from "./multi-repo.js";
 import { LINEAR_OAUTH_AUTH_URL, LINEAR_OAUTH_TOKEN_URL, LINEAR_AGENT_SCOPES } from "../api/auth.js";
 import { listWorktrees } from "./codex-worktree.js";
 import { loadPrompts, clearPromptCache } from "../pipeline/pipeline.js";
+import { PROFILES_PATH, createAgentProfilesFile, loadAgentProfiles } from "./shared-profiles.js";
 import {
   formatMessage,
   parseNotificationsConfig,
@@ -211,6 +212,265 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
       }
 
       console.log();
+    });
+
+  // --- interactive profile creation helper ---
+  async function createProfileInteractive(): Promise<void> {
+    const name = await prompt("  Agent name (lowercase, no spaces — e.g. bobbin): ");
+    if (!name) {
+      console.log("  Skipped.\n");
+      return;
+    }
+
+    const agentId = name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+    if (!agentId) {
+      console.log("  Invalid name. Skipped.\n");
+      return;
+    }
+
+    const labelDefault = agentId.charAt(0).toUpperCase() + agentId.slice(1);
+    const labelInput = await prompt(`  Display label [${labelDefault}]: `);
+    const label = labelInput || labelDefault;
+
+    const aliasInput = await prompt(`  Additional @mention aliases (comma-separated, or blank): `);
+    const extraAliases = aliasInput
+      ? aliasInput.split(",").map(a => a.trim().toLowerCase()).filter(Boolean)
+      : [];
+    const mentionAliases = [agentId, ...extraAliases.filter(a => a !== agentId)];
+
+    try {
+      createAgentProfilesFile({ agentId, label, mentionAliases });
+      console.log(`\n  ✓ Created ${PROFILES_PATH}`);
+      console.log(`    Agent: ${agentId} (${label})`);
+      console.log(`    Aliases: ${mentionAliases.map(a => "@" + a).join(", ")}`);
+      console.log(`    Default: yes`);
+    } catch (err) {
+      console.log(`\n  ✗ Failed to create agent-profiles.json: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // --- openclaw openclaw-linear setup ---
+  linear
+    .command("setup")
+    .description("Guided first-time setup — creates agent profile, checks auth, provisions webhook")
+    .action(async () => {
+      const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+
+      console.log("\nLinear Plugin Setup");
+      console.log("═".repeat(50));
+
+      // ---------------------------------------------------------------
+      // Step 1: Agent Profile
+      // ---------------------------------------------------------------
+      console.log("\nStep 1: Agent Profile");
+      console.log("─".repeat(50));
+
+      if (existsSync(PROFILES_PATH)) {
+        const profiles = loadAgentProfiles();
+        const count = Object.keys(profiles).length;
+        if (count > 0) {
+          const names = Object.entries(profiles)
+            .map(([id, p]) => `${id}${p.isDefault ? " (default)" : ""}`)
+            .join(", ");
+          console.log(`  ✓ agent-profiles.json found (${count} agent${count > 1 ? "s" : ""}: ${names})`);
+        } else {
+          console.log("  ⚠ agent-profiles.json exists but has no agents.");
+          const fix = await prompt("  Overwrite with a new profile? [Y/n]: ");
+          if (fix.toLowerCase() === "n") {
+            console.log("  Skipped. Fix the file manually and re-run setup.\n");
+          } else {
+            await createProfileInteractive();
+          }
+        }
+      } else {
+        console.log("  No agent-profiles.json found — let's create one!\n");
+        console.log("  Your agent needs a name so Linear users can @mention it.");
+        console.log("  Example: if your agent is called \"bobbin\", users type @bobbin in comments.\n");
+        await createProfileInteractive();
+      }
+
+      // ---------------------------------------------------------------
+      // Step 2: Authentication
+      // ---------------------------------------------------------------
+      console.log("\nStep 2: Authentication");
+      console.log("─".repeat(50));
+
+      const tokenInfo = resolveLinearToken(pluginConfig);
+      if (tokenInfo.accessToken) {
+        // Verify the token works
+        try {
+          const authHeader = tokenInfo.refreshToken
+            ? `Bearer ${tokenInfo.accessToken}`
+            : tokenInfo.accessToken;
+          const res = await fetch(LINEAR_GRAPHQL_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: authHeader },
+            body: JSON.stringify({ query: `{ viewer { name } organization { name } }` }),
+          });
+          if (res.ok) {
+            const payload = await res.json() as any;
+            if (payload.data?.viewer) {
+              console.log(`  ✓ Authenticated as ${payload.data.viewer.name} (${payload.data.organization.name})`);
+            } else {
+              console.log(`  ⚠ Token found but API returned errors. Run: openclaw openclaw-linear auth`);
+            }
+          } else {
+            console.log(`  ⚠ Token found but API returned ${res.status}. Run: openclaw openclaw-linear auth`);
+          }
+        } catch {
+          console.log(`  ⚠ Token found but API unreachable. Check network and retry.`);
+        }
+      } else {
+        console.log("  No Linear token found.\n");
+        const doAuth = await prompt("  Run OAuth authorization now? [Y/n]: ");
+        if (doAuth.toLowerCase() !== "n") {
+          const clientId = (pluginConfig?.clientId as string) ?? process.env.LINEAR_CLIENT_ID;
+          const clientSecret = (pluginConfig?.clientSecret as string) ?? process.env.LINEAR_CLIENT_SECRET;
+
+          if (!clientId || !clientSecret) {
+            console.log("\n  ✗ OAuth client ID and secret not configured.");
+            console.log("    Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET env vars,");
+            console.log("    or add clientId/clientSecret to the plugin config in openclaw.json.");
+            console.log("    Then re-run: openclaw openclaw-linear setup\n");
+          } else {
+            const gatewayPort = process.env.OPENCLAW_GATEWAY_PORT ?? "18789";
+            const redirectUri = (pluginConfig?.redirectUri as string)
+              ?? process.env.LINEAR_REDIRECT_URI
+              ?? `http://localhost:${gatewayPort}/linear/oauth/callback`;
+
+            const state = Math.random().toString(36).substring(7);
+            const authUrl = `${LINEAR_OAUTH_AUTH_URL}?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(LINEAR_AGENT_SCOPES)}&state=${state}&actor=app`;
+
+            console.log("\n  Opening Linear OAuth page...\n");
+            console.log(`    ${authUrl}\n`);
+            openBrowser(authUrl);
+
+            const code = await prompt("  Paste the authorization code from Linear: ");
+            if (code) {
+              try {
+                const response = await fetch(LINEAR_OAUTH_TOKEN_URL, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                  body: new URLSearchParams({
+                    grant_type: "authorization_code",
+                    code,
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                    redirect_uri: redirectUri,
+                  }),
+                });
+
+                if (response.ok) {
+                  const tokens = await response.json() as any;
+                  let store: any = { version: 1, profiles: {} };
+                  try {
+                    const raw = readFileSync(AUTH_PROFILES_PATH, "utf8");
+                    store = JSON.parse(raw);
+                  } catch { /* fresh store */ }
+
+                  store.profiles = store.profiles ?? {};
+                  store.profiles["linear:default"] = {
+                    type: "oauth",
+                    provider: "linear",
+                    accessToken: tokens.access_token,
+                    access: tokens.access_token,
+                    refreshToken: tokens.refresh_token ?? null,
+                    refresh: tokens.refresh_token ?? null,
+                    expiresAt: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : null,
+                    expires: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : null,
+                    scope: tokens.scope,
+                  };
+
+                  writeFileSync(AUTH_PROFILES_PATH, JSON.stringify(store, null, 2), "utf8");
+                  console.log("  ✓ Token saved to auth-profiles.json");
+                } else {
+                  const error = await response.text();
+                  console.log(`  ✗ Token exchange failed (${response.status}): ${error}`);
+                }
+              } catch (err) {
+                console.log(`  ✗ Token exchange error: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            } else {
+              console.log("  Skipped. Run: openclaw openclaw-linear auth later.");
+            }
+          }
+        } else {
+          console.log("  Skipped. Run: openclaw openclaw-linear auth when ready.");
+        }
+      }
+
+      // ---------------------------------------------------------------
+      // Step 3: Webhook
+      // ---------------------------------------------------------------
+      console.log("\nStep 3: Webhook");
+      console.log("─".repeat(50));
+
+      const freshToken = resolveLinearToken(pluginConfig);
+      if (!freshToken.accessToken) {
+        console.log("  ⚠ Skipped — no auth token available. Complete Step 2 first.");
+      } else {
+        const { provisionWebhook, getWebhookStatus } = await import("./webhook-provision.js");
+        const linearApi = new LinearAgentApi(freshToken.accessToken, {
+          refreshToken: freshToken.refreshToken,
+          expiresAt: freshToken.expiresAt,
+        });
+
+        const webhookUrl = (pluginConfig?.webhookUrl as string)
+          ?? "https://linear.calltelemetry.com/linear/webhook";
+
+        try {
+          const status = await getWebhookStatus(linearApi, webhookUrl);
+          if (status && status.issues.length === 0) {
+            console.log(`  ✓ Webhook already configured (${webhookUrl})`);
+          } else {
+            const result = await provisionWebhook(linearApi, webhookUrl, { allPublicTeams: true });
+            if (result.action === "created") {
+              console.log(`  ✓ Webhook created (${result.webhookId})`);
+            } else if (result.action === "updated") {
+              console.log(`  ✓ Webhook updated (${result.webhookId})`);
+            } else {
+              console.log(`  ✓ Webhook OK (${result.webhookId})`);
+            }
+          }
+        } catch (err) {
+          console.log(`  ⚠ Webhook check failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.log("    Run: openclaw openclaw-linear webhooks setup");
+        }
+      }
+
+      // ---------------------------------------------------------------
+      // Step 4: Verify
+      // ---------------------------------------------------------------
+      console.log("\nStep 4: Verification");
+      console.log("─".repeat(50));
+
+      try {
+        const { runDoctor, formatReport } = await import("./doctor.js");
+        const report = await runDoctor({
+          fix: false,
+          json: false,
+          pluginConfig,
+        });
+
+        console.log(formatReport(report));
+
+        if (report.summary.errors === 0) {
+          const profiles = loadAgentProfiles();
+          const defaultAgent = Object.entries(profiles).find(([, p]) => p.isDefault);
+          const agentName = defaultAgent?.[1]?.label ?? defaultAgent?.[0] ?? "your agent";
+          console.log("─".repeat(50));
+          console.log(`Setup complete! ${agentName} is ready to receive Linear issues.`);
+          console.log(`\nRestart the gateway to apply changes:`);
+          console.log(`  systemctl --user restart openclaw-gateway\n`);
+        } else {
+          console.log("─".repeat(50));
+          console.log("Some issues remain. Fix them and run: openclaw openclaw-linear doctor --fix\n");
+          process.exitCode = 1;
+        }
+      } catch (err) {
+        console.log(`  ⚠ Doctor failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.log("  Run: openclaw openclaw-linear doctor for details.\n");
+      }
     });
 
   // --- openclaw openclaw-linear worktrees ---

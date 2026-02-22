@@ -649,7 +649,7 @@ describe("webhook scenario tests — full handler flows", () => {
 
       expect(mockRunAgent).toHaveBeenCalledOnce();
       const runArgs = mockRunAgent.mock.calls[0][0];
-      expect(runArgs.message).toContain("Additional Guidance");
+      expect(runArgs.message).toContain("Workspace Guidance");
       expect(runArgs.message).toContain("Always use the main branch");
     });
 
@@ -668,11 +668,12 @@ describe("webhook scenario tests — full handler flows", () => {
       expect(mockRunAgent).toHaveBeenCalledOnce();
       const msg = mockRunAgent.mock.calls[0][0].message;
 
-      // Guidance text should appear in the appendix section, not as the user's comment
-      const userMsgSection = msg.split("Additional Guidance")[0];
-      expect(userMsgSection).toContain("Please fix the routing bug");
-      // The guidance string itself should not appear before the appendix
-      expect(userMsgSection).not.toContain("Always use the main branch");
+      // Guidance text should appear in the guidance section, not as the user's latest message
+      expect(msg).toContain("Please fix the routing bug");
+      // The guidance text should be within the guidance section, not in the "Latest message" block
+      const latestMsgSection = msg.split("**Latest message:**")[1] ?? "";
+      expect(latestMsgSection).toContain("Please fix the routing bug");
+      expect(latestMsgSection).not.toContain("Always use the main branch");
     });
 
     it("prompted: includes guidance from promptContext", async () => {
@@ -688,7 +689,7 @@ describe("webhook scenario tests — full handler flows", () => {
       expect(mockRunAgent).toHaveBeenCalledOnce();
       const msg = mockRunAgent.mock.calls[0][0].message;
       expect(msg).toContain("Can you also fix the tests?");
-      expect(msg).toContain("Additional Guidance");
+      expect(msg).toContain("Workspace Guidance");
       expect(msg).toContain("Use TypeScript strict mode");
     });
 
@@ -704,7 +705,7 @@ describe("webhook scenario tests — full handler flows", () => {
 
       expect(mockRunAgent).toHaveBeenCalledOnce();
       const msg = mockRunAgent.mock.calls[0][0].message;
-      expect(msg).not.toContain("Additional Guidance");
+      expect(msg).not.toContain("Workspace Guidance");
       expect(msg).not.toContain("Should not appear in prompt");
     });
 
@@ -724,7 +725,7 @@ describe("webhook scenario tests — full handler flows", () => {
 
       expect(mockRunAgent).toHaveBeenCalledOnce();
       const msg = mockRunAgent.mock.calls[0][0].message;
-      expect(msg).not.toContain("Additional Guidance");
+      expect(msg).not.toContain("Workspace Guidance");
       expect(msg).not.toContain("Should be suppressed");
     });
 
@@ -782,7 +783,7 @@ describe("webhook scenario tests — full handler flows", () => {
 
       expect(mockRunAgent).toHaveBeenCalledOnce();
       const msg = mockRunAgent.mock.calls[0][0].message;
-      expect(msg).toContain("Additional Guidance");
+      expect(msg).toContain("Workspace Guidance");
       expect(msg).toContain("Cached guidance from session event");
     });
   });
