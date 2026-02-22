@@ -15,7 +15,7 @@ import { readPlanningState, isInPlanningMode, getPlanningSession, endPlanningSes
 import { initiatePlanningSession, handlePlannerTurn, runPlanAudit } from "./planner.js";
 import { startProjectDispatch } from "./dag-dispatch.js";
 import { emitDiagnostic } from "../infra/observability.js";
-import { classifyIntent } from "./intent-classify.js";
+import { classifyIntent, type Intent } from "./intent-classify.js";
 import { extractGuidance, formatGuidanceAppendix, cacheGuidanceForTeam, getCachedGuidanceForTeam, isGuidanceEnabled, _resetGuidanceCacheForTesting } from "./guidance.js";
 import { loadAgentProfiles, buildMentionPattern, resolveAgentFromAlias, validateProfiles, _resetProfilesCacheForTesting, type AgentProfile } from "../infra/shared-profiles.js";
 
@@ -33,6 +33,28 @@ export function sanitizePromptInput(text: string, maxLength = 4000): string {
   // Escape template variable patterns that could interfere with prompt processing
   sanitized = sanitized.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }");
   return sanitized;
+}
+
+/**
+ * Check if a work request should be blocked based on issue state.
+ * Returns a rejection message if blocked, null if allowed.
+ */
+function shouldBlockWorkRequest(
+  intent: Intent,
+  stateType: string,
+  stateName: string,
+  issueRef: string,
+): string | null {
+  if (intent !== "request_work") return null;
+  if (stateType === "started") return null; // In Progress — allow
+  return (
+    `This issue (${issueRef}) is in **${stateName}** — it needs planning and scoping before implementation.\n\n` +
+    `**To move forward:**\n` +
+    `1. Update the issue description with requirements and acceptance criteria\n` +
+    `2. Move the issue to **In Progress**\n` +
+    `3. Then ask me to implement it\n\n` +
+    `I can help you scope and plan — just ask questions or discuss the approach.`
+  );
 }
 
 // Track issues with active agent runs to prevent concurrent duplicate runs.
@@ -448,7 +470,7 @@ export async function handleLinearWebhook(
       : [
         `**Tool access:**`,
         `- \`linear_issues\` tool: READ ONLY. Use action="read" with issueId="${issueRef}" to get details, action="list_states"/"list_labels" for metadata. Do NOT use action="update", action="create", or action="comment".`,
-        `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
+        `- \`code_run\`: **Planning mode only.** Workers may explore code and write plan files (PLAN.md, design docs). Workers MUST NOT create, modify, or delete source code, run deployments, or make system changes. Use for codebase exploration and planning only.`,
         `- \`spawn_agent\`/\`ask_agent\`: Delegate to other crew agents.`,
         `- Standard tools: exec, read, edit, write, web_search, etc.`,
       ];
@@ -459,6 +481,35 @@ export async function handleLinearWebhook(
 
     if (guidanceAppendix) {
       api.logger.info(`Guidance injected (${guidanceCtx.source}): ${guidanceCtx.guidance?.slice(0, 120)}...`);
+    }
+
+    // ── Intent gate: classify user request and block work requests on untriaged issues ──
+    const classifyText = userMessage || promptContext || enrichedIssue?.title || "";
+    const projectId = enrichedIssue?.project?.id;
+    let isPlanning = false;
+    if (projectId) {
+      try {
+        const planState = await readPlanningState(pluginConfig?.planningStatePath as string | undefined);
+        isPlanning = isInPlanningMode(planState, projectId);
+      } catch { /* proceed without planning context */ }
+    }
+
+    const intentResult = await classifyIntent(api, {
+      commentBody: classifyText,
+      issueTitle: enrichedIssue?.title ?? "(untitled)",
+      issueStatus: enrichedIssue?.state?.name,
+      isPlanning,
+      agentNames: Object.keys(profiles),
+      hasProject: !!projectId,
+    }, pluginConfig as Record<string, unknown> | undefined);
+
+    api.logger.info(`AgentSession.created intent: ${intentResult.intent}${intentResult.agentId ? ` (agent: ${intentResult.agentId})` : ""} — ${intentResult.reasoning}`);
+
+    const blockMsg = shouldBlockWorkRequest(intentResult.intent, stateType, enrichedIssue?.state?.name ?? "Unknown", issueRef);
+    if (blockMsg) {
+      api.logger.info(`AgentSession.created: blocking work request on untriaged issue ${issueRef}`);
+      await linearApi.emitActivity(session.id, { type: "response", body: blockMsg }).catch(() => {});
+      return true;
     }
 
     const message = [
@@ -698,7 +749,7 @@ export async function handleLinearWebhook(
         : [
           `**Tool access:**`,
           `- \`linear_issues\` tool: READ ONLY. Use action="read" with issueId="${followUpIssueRef}" to get details, action="list_states"/"list_labels" for metadata. Do NOT use action="update", action="create", or action="comment".`,
-          `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
+          `- \`code_run\`: **Planning mode only.** Workers may explore code and write plan files (PLAN.md, design docs). Workers MUST NOT create, modify, or delete source code, run deployments, or make system changes. Use for codebase exploration and planning only.`,
           `- \`spawn_agent\`/\`ask_agent\`: Delegate to other crew agents.`,
           `- Standard tools: exec, read, edit, write, web_search, etc.`,
         ];
@@ -709,6 +760,37 @@ export async function handleLinearWebhook(
 
       if (followUpGuidanceAppendix) {
         api.logger.info(`Follow-up guidance injected: ${(guidanceCtxPrompted.guidance ?? "cached").slice(0, 120)}...`);
+      }
+
+      // ── Intent gate: classify follow-up and block work requests on untriaged issues ──
+      const followUpProjectId = enrichedIssue?.project?.id;
+      let followUpIsPlanning = false;
+      if (followUpProjectId) {
+        try {
+          const planState = await readPlanningState(pluginConfig?.planningStatePath as string | undefined);
+          followUpIsPlanning = isInPlanningMode(planState, followUpProjectId);
+        } catch { /* proceed without planning context */ }
+      }
+
+      const followUpIntentResult = await classifyIntent(api, {
+        commentBody: userMessage,
+        issueTitle: enrichedIssue?.title ?? "(untitled)",
+        issueStatus: enrichedIssue?.state?.name,
+        isPlanning: followUpIsPlanning,
+        agentNames: Object.keys(profiles),
+        hasProject: !!followUpProjectId,
+      }, pluginConfig as Record<string, unknown> | undefined);
+
+      api.logger.info(`AgentSession.prompted intent: ${followUpIntentResult.intent}${followUpIntentResult.agentId ? ` (agent: ${followUpIntentResult.agentId})` : ""} — ${followUpIntentResult.reasoning}`);
+
+      const followUpBlockMsg = shouldBlockWorkRequest(
+        followUpIntentResult.intent, followUpStateType, enrichedIssue?.state?.name ?? "Unknown", followUpIssueRef,
+      );
+      if (followUpBlockMsg) {
+        api.logger.info(`AgentSession.prompted: blocking work request on untriaged issue ${followUpIssueRef}`);
+        await linearApi.emitActivity(session.id, { type: "response", body: followUpBlockMsg }).catch(() => {});
+        activeRuns.delete(issue.id);
+        return;
       }
 
       const message = [
@@ -856,7 +938,7 @@ export async function handleLinearWebhook(
     const profiles = loadAgentProfiles();
     const agentNames = Object.keys(profiles);
 
-    // ── @mention fast path — skip classifier ────────────────────
+    // ── @mention fast path — with intent gate ────────────────────
     const mentionPattern = buildMentionPattern(profiles);
     const mentionMatches = mentionPattern ? commentBody.match(mentionPattern) : null;
     if (mentionMatches && mentionMatches.length > 0) {
@@ -864,6 +946,42 @@ export async function handleLinearWebhook(
       const resolved = resolveAgentFromAlias(alias, profiles);
       if (resolved) {
         api.logger.info(`Comment @mention fast path: @${resolved.agentId} on ${issue.identifier ?? issue.id}`);
+
+        // Classify intent even on @mention path to gate work requests
+        let enrichedForGate: any = issue;
+        try { enrichedForGate = await linearApi.getIssueDetails(issue.id); } catch {}
+        const mentionStateType = enrichedForGate?.state?.type ?? "";
+        const mentionProjectId = enrichedForGate?.project?.id;
+        let mentionIsPlanning = false;
+        if (mentionProjectId) {
+          try {
+            const planState = await readPlanningState(pluginConfig?.planningStatePath as string | undefined);
+            mentionIsPlanning = isInPlanningMode(planState, mentionProjectId);
+          } catch {}
+        }
+
+        const mentionIntentResult = await classifyIntent(api, {
+          commentBody,
+          issueTitle: enrichedForGate?.title ?? "(untitled)",
+          issueStatus: enrichedForGate?.state?.name,
+          isPlanning: mentionIsPlanning,
+          agentNames,
+          hasProject: !!mentionProjectId,
+        }, pluginConfig);
+
+        api.logger.info(`Comment @mention intent: ${mentionIntentResult.intent} — ${mentionIntentResult.reasoning}`);
+
+        const mentionBlockMsg = shouldBlockWorkRequest(
+          mentionIntentResult.intent, mentionStateType,
+          enrichedForGate?.state?.name ?? "Unknown",
+          enrichedForGate?.identifier ?? issue.identifier ?? issue.id,
+        );
+        if (mentionBlockMsg) {
+          api.logger.info(`Comment @mention: blocking work request on untriaged issue ${enrichedForGate?.identifier ?? issue.identifier ?? issue.id}`);
+          try { await createCommentWithDedup(linearApi, issue.id, mentionBlockMsg); } catch {}
+          return true;
+        }
+
         void dispatchCommentToAgent(api, linearApi, profiles, resolved.agentId, issue, comment, commentBody, commentor, pluginConfig)
           .catch((err) => api.logger.error(`Comment dispatch error: ${err}`));
         return true;
@@ -905,6 +1023,19 @@ export async function handleLinearWebhook(
     }, pluginConfig);
 
     api.logger.info(`Comment intent: ${intentResult.intent}${intentResult.agentId ? ` (agent: ${intentResult.agentId})` : ""} — ${intentResult.reasoning} (fallback: ${intentResult.fromFallback})`);
+
+    // ── Gate work requests on untriaged issues ────────────────────
+    const commentStateType = enrichedIssue?.state?.type ?? "";
+    const commentBlockMsg = shouldBlockWorkRequest(
+      intentResult.intent, commentStateType,
+      enrichedIssue?.state?.name ?? "Unknown",
+      enrichedIssue?.identifier ?? issue.identifier ?? issue.id,
+    );
+    if (commentBlockMsg) {
+      api.logger.info(`Comment: blocking work request on untriaged issue ${enrichedIssue?.identifier ?? issue.identifier ?? issue.id}`);
+      try { await createCommentWithDedup(linearApi, issue.id, commentBlockMsg); } catch {}
+      return true;
+    }
 
     // ── Route by intent ────────────────────────────────────────────
 
@@ -1461,7 +1592,7 @@ async function dispatchCommentToAgent(
     : [
       `**Tool access:**`,
       `- \`linear_issues\` tool: READ ONLY. Use action="read" with issueId="${issueRef}" to get details, action="list_states"/"list_labels" for metadata. Do NOT use action="update", action="create", or action="comment".`,
-      `- \`code_run\`: Dispatch coding work to a worker. Workers return text — they cannot access linear_issues.`,
+      `- \`code_run\`: **Planning mode only.** Workers may explore code and write plan files (PLAN.md, design docs). Workers MUST NOT create, modify, or delete source code, run deployments, or make system changes. Use for codebase exploration and planning only.`,
       `- Standard tools: exec, read, edit, write, web_search, etc.`,
     ];
 

@@ -229,6 +229,56 @@ export default function register(api: OpenClawPluginApi) {
     }
   });
 
+  // Hard gate: prepend planning-only constraints to code_run when issue is not "started".
+  // Even if the orchestrator LLM ignores scope rules, the coding agent receives hard constraints.
+  api.on("before_tool_call", async (event: any, _ctx: any) => {
+    if (event.toolName !== "code_run") return;
+
+    const { getCurrentSession } = await import("./src/pipeline/active-session.js");
+    const session = getCurrentSession();
+    if (!session?.issueId) return; // Non-Linear context, allow
+
+    // Check issue state
+    const hookTokenInfo = resolveLinearToken(pluginConfig);
+    if (!hookTokenInfo.accessToken) return;
+    const hookLinearApi = new LinearAgentApi(hookTokenInfo.accessToken, {
+      refreshToken: hookTokenInfo.refreshToken,
+      expiresAt: hookTokenInfo.expiresAt,
+    });
+
+    try {
+      const issue = await hookLinearApi.getIssueDetails(session.issueId);
+      const stateType = issue?.state?.type ?? "";
+      const isStarted = stateType === "started";
+
+      if (!isStarted) {
+        const constraint = [
+          "CRITICAL CONSTRAINT — PLANNING MODE ONLY:",
+          `This issue (${session.issueIdentifier}) is in "${issue?.state?.name ?? stateType}" state — NOT In Progress.`,
+          "You may ONLY:",
+          "- Read and explore files to understand the codebase",
+          "- Write plan files (PLAN.md, notes, design outlines)",
+          "- Search code to inform planning",
+          "You MUST NOT:",
+          "- Create, modify, or delete source code, config, or infrastructure files",
+          "- Run system commands that change state (deploys, installs, migrations)",
+          "- Make external API requests that modify data",
+          "- Build, implement, or scaffold any application code",
+          "Plan and explore ONLY. Do not implement anything.",
+          "---",
+        ].join("\n");
+
+        const originalPrompt = event.params?.prompt ?? "";
+        return {
+          params: { ...event.params, prompt: `${constraint}\n${originalPrompt}` },
+        };
+      }
+    } catch (err) {
+      api.logger.warn(`before_tool_call: issue state check failed: ${err}`);
+      // Don't block on failure — fall through to allow
+    }
+  });
+
   // Narration Guard: catch short "Let me explore..." responses that narrate intent
   // without actually calling tools, and append a warning for the user.
   const NARRATION_PATTERNS = [

@@ -1261,7 +1261,7 @@ describe("Comment.create intent routing", () => {
       identifier: "ENG-RW",
       title: "Request Work",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-rw" },
       comments: { nodes: [] },
     });
@@ -2219,7 +2219,7 @@ describe("dispatchCommentToAgent via Comment.create intents", () => {
       identifier: "ENG-DE",
       title: "Dispatch Error",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-de" },
       comments: { nodes: [] },
     });
@@ -2709,7 +2709,7 @@ describe("postAgentComment edge cases", () => {
       identifier: "ENG-IF",
       title: "Identity Fail",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-if" },
       comments: { nodes: [] },
     });
@@ -3405,7 +3405,7 @@ describe("Comment.create .catch callbacks on fire-and-forget dispatches", () => 
       identifier: "ENG-RWC",
       title: "Request Work Catch",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-rwc" },
       comments: { nodes: [] },
     });
@@ -3599,7 +3599,7 @@ describe("dispatchCommentToAgent internal .catch callbacks", () => {
       identifier: "ENG-DCE",
       title: "DCA Error",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-dce" },
       comments: { nodes: [] },
     });
@@ -4865,7 +4865,7 @@ describe("session affinity routing", () => {
       identifier: "ENG-AFF-RW",
       title: "Affinity Request Work",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-aff" },
       comments: { nodes: [] },
     });
@@ -4899,7 +4899,7 @@ describe("session affinity routing", () => {
       identifier: "ENG-NO-AFF",
       title: "No Affinity",
       description: "desc",
-      state: { name: "Backlog", type: "backlog" },
+      state: { name: "In Progress", type: "started" },
       team: { id: "team-noaff" },
       comments: { nodes: [] },
     });
