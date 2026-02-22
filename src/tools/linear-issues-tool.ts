@@ -86,12 +86,14 @@ async function handleCreate(api: LinearAgentApi, params: ToolParams) {
   // Resolve teamId: explicit param, or derive from parent issue
   let teamId = params.teamId;
   let projectId = params.projectId;
+  let resolvedParentId: string | undefined;
 
   if (params.parentIssueId) {
-    // Fetch parent to get teamId and projectId
+    // Fetch parent to get teamId, projectId, and resolved UUID
     const parent = await api.getIssueDetails(params.parentIssueId);
     teamId = teamId ?? parent.team.id;
     projectId = projectId ?? parent.project?.id ?? undefined;
+    resolvedParentId = parent.id;
   }
 
   if (!teamId) {
@@ -106,7 +108,7 @@ async function handleCreate(api: LinearAgentApi, params: ToolParams) {
   };
 
   if (params.description) input.description = params.description;
-  if (params.parentIssueId) input.parentId = params.parentIssueId;
+  if (resolvedParentId) input.parentId = resolvedParentId;
   if (projectId) input.projectId = projectId;
   if (params.priority != null) input.priority = params.priority;
   if (params.estimate != null) input.estimate = params.estimate;

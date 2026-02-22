@@ -342,7 +342,7 @@ describe("linear_issues tool", () => {
         projectId: "proj-1",
         title: "Sub-task: handle edge case",
         description: "Fix the edge case for empty input",
-        parentId: "ENG-123",
+        parentId: "issue-1",  // Resolved UUID from getIssueDetails, not the identifier "ENG-123"
       });
       expect(result.success).toBe(true);
       expect(result.identifier).toBe("ENG-201");

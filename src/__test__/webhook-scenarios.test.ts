@@ -82,6 +82,7 @@ vi.mock("../pipeline/pipeline.js", () => ({
   runPlannerStage: vi.fn().mockResolvedValue("mock plan"),
   runFullPipeline: vi.fn().mockResolvedValue(undefined),
   resumePipeline: vi.fn().mockResolvedValue(undefined),
+  buildProjectContext: () => "",
 }));
 
 vi.mock("../pipeline/active-session.js", () => ({
@@ -785,6 +786,49 @@ describe("webhook scenario tests — full handler flows", () => {
       const msg = mockRunAgent.mock.calls[0][0].message;
       expect(msg).toContain("Workspace Guidance");
       expect(msg).toContain("Cached guidance from session event");
+    });
+  });
+
+  describe("Sub-issue guidance in agent prompt", () => {
+    it("created: triaged issue includes sub-issue guidance with parentIssueId", async () => {
+      // Issue is "In Progress" (type: "started") — triaged, so full tool access
+      mockGetIssueDetails.mockResolvedValue(makeIssueDetails({
+        state: { name: "In Progress", type: "started" },
+      }));
+
+      const api = createApi();
+      const payload = makeAgentSessionEventCreated();
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+
+      // Verify sub-issue guidance text includes the correct parentIssueId
+      expect(msg).toContain("Sub-issue guidance");
+      expect(msg).toContain("break it into sub-issues");
+      expect(msg).toContain('parentIssueId="ENG-123"');
+    });
+
+    it("created: backlog issue does NOT include sub-issue guidance", async () => {
+      // Issue is "Backlog" (type: "backlog") — untriaged, so read-only tool access
+      mockGetIssueDetails.mockResolvedValue(makeIssueDetails({
+        state: { name: "Backlog", type: "backlog" },
+      }));
+
+      const api = createApi();
+      const payload = makeAgentSessionEventCreated();
+      await postWebhook(api, payload);
+
+      await waitForMock(mockClearActiveSession);
+
+      expect(mockRunAgent).toHaveBeenCalledOnce();
+      const msg = mockRunAgent.mock.calls[0][0].message;
+
+      // Backlog issues get READ ONLY access — no sub-issue guidance
+      expect(msg).not.toContain("Sub-issue guidance");
+      expect(msg).toContain("READ ONLY");
     });
   });
 });
