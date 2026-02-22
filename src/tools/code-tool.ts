@@ -164,7 +164,7 @@ export function createCodeTool(
         },
         workingDir: {
           type: "string",
-          description: "Override working directory (default: /home/claw/ai-workspace).",
+          description: "Override working directory (default: ~/ai-workspace).",
         },
         model: {
           type: "string",

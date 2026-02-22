@@ -10,13 +10,14 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LinearAgentApi } from "../api/linear-api.js";
 
 // ── Setup ──────────────────────────────────────────────────────────
 
 const AUTH_PROFILES_PATH = join(
-  process.env.HOME ?? "/home/claw",
+  homedir(),
   ".openclaw",
   "auth-profiles.json",
 );

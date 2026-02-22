@@ -4,6 +4,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../pipeline/active-session.js", () => ({
   getCurrentSession: vi.fn(() => null),
   getActiveSessionByIdentifier: vi.fn(() => null),
+  getIssueAffinity: vi.fn().mockReturnValue(null),
+  _configureAffinityTtl: vi.fn(),
+  _resetAffinityForTesting: vi.fn(),
 }));
 
 // Mock the linear-api module — LinearAgentApi must be a class (used with `new`)

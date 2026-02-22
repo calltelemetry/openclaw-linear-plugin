@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { LinearAgentApi, resolveLinearToken } from "../api/linear-api.js";
 import { spawnWorker, type HookContext } from "./pipeline.js";
-import { setActiveSession, clearActiveSession } from "./active-session.js";
+import { setActiveSession, clearActiveSession, getIssueAffinity, _configureAffinityTtl, _resetAffinityForTesting } from "./active-session.js";
 import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch } from "./dispatch-state.js";
 import { createNotifierFromConfig, type NotifyFn } from "../infra/notify.js";
 import { assessTier } from "./tier-assess.js";
@@ -80,6 +80,7 @@ export function _resetForTesting(): void {
   _dedupTtlMs = 60_000;
   _sweepIntervalMs = 10_000;
   _resetGuidanceCacheForTesting();
+  _resetAffinityForTesting();
 }
 
 /** @internal — test-only; add an issue ID to the activeRuns set. */
@@ -346,6 +347,14 @@ export async function handleLinearWebhook(
         }
       }
     }
+    // Session affinity: if no @mention override, prefer the agent that last handled this issue
+    if (agentId === resolveAgentId(api) && issue?.id) {
+      const affinityAgent = getIssueAffinity(issue.id);
+      if (affinityAgent) {
+        api.logger.info(`AgentSession routed to ${affinityAgent} via session affinity for ${issue.identifier ?? issue.id}`);
+        agentId = affinityAgent;
+      }
+    }
 
     api.logger.info(`AgentSession created: ${session.id} for issue ${issue?.identifier ?? issue?.id} agent=${agentId} (comments: ${previousComments.length}, guidance: ${guidanceCtx.guidance ? "yes" : "no"})`);
 
@@ -555,6 +564,14 @@ export async function handleLinearWebhook(
           api.logger.info(`AgentSession prompted: routed to ${resolved.agentId} via @${alias} mention`);
           agentId = resolved.agentId;
         }
+      }
+    }
+    // Session affinity: if no @mention override, prefer the agent that last handled this issue
+    if (agentId === resolveAgentId(api) && issue?.id) {
+      const affinityAgent = getIssueAffinity(issue.id);
+      if (affinityAgent) {
+        api.logger.info(`AgentSession prompted: routed to ${affinityAgent} via session affinity for ${issue.identifier ?? issue.id}`);
+        agentId = affinityAgent;
       }
     }
 
@@ -885,8 +902,9 @@ export async function handleLinearWebhook(
       case "plan_continue": {
         if (!isPlanning || !planSession) {
           // Not in planning mode — treat as general
-          api.logger.info("Comment intent plan_continue but not in planning mode — dispatching to default agent");
-          void dispatchCommentToAgent(api, linearApi, profiles, resolveAgentId(api), issue, comment, commentBody, commentor, pluginConfig)
+          const planContinueAgent = getIssueAffinity(issue.id) ?? resolveAgentId(api);
+          api.logger.info(`Comment intent plan_continue but not in planning mode — dispatching to ${planContinueAgent}`);
+          void dispatchCommentToAgent(api, linearApi, profiles, planContinueAgent, issue, comment, commentBody, commentor, pluginConfig)
             .catch((err) => api.logger.error(`Comment dispatch error: ${err}`));
           break;
         }
@@ -908,15 +926,15 @@ export async function handleLinearWebhook(
 
       case "request_work":
       case "question": {
-        const defaultAgent = resolveAgentId(api);
-        api.logger.info(`Comment intent ${intentResult.intent}: routing to default agent ${defaultAgent}`);
+        const defaultAgent = getIssueAffinity(issue.id) ?? resolveAgentId(api);
+        api.logger.info(`Comment intent ${intentResult.intent}: routing to ${defaultAgent}`);
         void dispatchCommentToAgent(api, linearApi, profiles, defaultAgent, issue, comment, commentBody, commentor, pluginConfig)
           .catch((err) => api.logger.error(`Comment dispatch error: ${err}`));
         break;
       }
 
       case "close_issue": {
-        const closeAgent = resolveAgentId(api);
+        const closeAgent = getIssueAffinity(issue.id) ?? resolveAgentId(api);
         api.logger.info(`Comment intent close_issue: closing ${issue.identifier ?? issue.id} via ${closeAgent}`);
         void handleCloseIssue(api, linearApi, profiles, closeAgent, issue, comment, commentBody, commentor, pluginConfig)
           .catch((err) => api.logger.error(`Close issue error: ${err}`));

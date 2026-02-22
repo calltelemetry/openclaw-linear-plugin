@@ -13,7 +13,7 @@ import {
 } from "./cli-shared.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "../agent/watchdog.js";
 
-const CODEX_BIN = "/home/claw/.npm-global/bin/codex";
+const CODEX_BIN = "codex";
 
 /**
  * Parse a JSONL line from `codex exec --json` and map it to a Linear activity.

@@ -10,6 +10,11 @@ import {
   getCurrentSession,
   getSessionCount,
   hydrateFromDispatchState,
+  recordIssueAffinity,
+  getIssueAffinity,
+  _configureAffinityTtl,
+  _getAffinityTtlMs,
+  _resetAffinityForTesting,
   type ActiveSession,
 } from "./active-session.js";
 
@@ -25,10 +30,11 @@ function makeSession(overrides?: Partial<ActiveSession>): ActiveSession {
 
 // Clean up after each test to avoid cross-contamination
 afterEach(() => {
-  // Clear all known sessions
+  // Clear all known sessions (use sessions.delete directly to avoid triggering affinity)
   clearActiveSession("uuid-1");
   clearActiveSession("uuid-2");
   clearActiveSession("uuid-3");
+  _resetAffinityForTesting();
 });
 
 describe("set + get", () => {
@@ -150,5 +156,94 @@ describe("hydrateFromDispatchState", () => {
     const statePath = join(dir, "state.json");
     const restored = await hydrateFromDispatchState(statePath);
     expect(restored).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue-agent affinity
+// ---------------------------------------------------------------------------
+
+describe("issue agent affinity", () => {
+  it("recordIssueAffinity + getIssueAffinity round-trip", () => {
+    recordIssueAffinity("uuid-1", "mal");
+    expect(getIssueAffinity("uuid-1")).toBe("mal");
+  });
+
+  it("returns null for unknown issue", () => {
+    expect(getIssueAffinity("no-such-id")).toBeNull();
+  });
+
+  it("returns null after TTL expires", () => {
+    _configureAffinityTtl(100); // 100ms TTL
+    recordIssueAffinity("uuid-1", "mal");
+    vi.useFakeTimers();
+    vi.advanceTimersByTime(150);
+    expect(getIssueAffinity("uuid-1")).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("returns agent within TTL", () => {
+    _configureAffinityTtl(60_000);
+    recordIssueAffinity("uuid-1", "kaylee");
+    expect(getIssueAffinity("uuid-1")).toBe("kaylee");
+  });
+
+  it("overwrites previous affinity for same issue", () => {
+    recordIssueAffinity("uuid-1", "mal");
+    recordIssueAffinity("uuid-1", "kaylee");
+    expect(getIssueAffinity("uuid-1")).toBe("kaylee");
+  });
+
+  it("tracks separate issues independently", () => {
+    recordIssueAffinity("uuid-1", "mal");
+    recordIssueAffinity("uuid-2", "kaylee");
+    expect(getIssueAffinity("uuid-1")).toBe("mal");
+    expect(getIssueAffinity("uuid-2")).toBe("kaylee");
+  });
+
+  it("clearActiveSession records affinity when agentId present", () => {
+    setActiveSession({
+      agentSessionId: "sess-1",
+      issueIdentifier: "API-100",
+      issueId: "uuid-1",
+      agentId: "mal",
+      startedAt: Date.now(),
+    });
+    clearActiveSession("uuid-1");
+    expect(getActiveSession("uuid-1")).toBeNull(); // session cleared
+    expect(getIssueAffinity("uuid-1")).toBe("mal"); // affinity preserved
+  });
+
+  it("clearActiveSession does NOT record affinity when agentId missing", () => {
+    setActiveSession({
+      agentSessionId: "sess-1",
+      issueIdentifier: "API-100",
+      issueId: "uuid-1",
+      startedAt: Date.now(),
+      // no agentId
+    });
+    clearActiveSession("uuid-1");
+    expect(getIssueAffinity("uuid-1")).toBeNull();
+  });
+
+  it("_resetAffinityForTesting clears all entries and resets TTL", () => {
+    _configureAffinityTtl(5000);
+    recordIssueAffinity("uuid-1", "mal");
+    recordIssueAffinity("uuid-2", "kaylee");
+    _resetAffinityForTesting();
+    expect(getIssueAffinity("uuid-1")).toBeNull();
+    expect(getIssueAffinity("uuid-2")).toBeNull();
+    expect(_getAffinityTtlMs()).toBe(30 * 60_000);
+  });
+
+  it("_configureAffinityTtl sets custom TTL", () => {
+    _configureAffinityTtl(5000);
+    expect(_getAffinityTtlMs()).toBe(5000);
+  });
+
+  it("_configureAffinityTtl resets to default when called with undefined", () => {
+    _configureAffinityTtl(5000);
+    _configureAffinityTtl(undefined);
+    expect(_getAffinityTtlMs()).toBe(30 * 60_000);
   });
 });

@@ -13,7 +13,7 @@ import {
 } from "./cli-shared.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "../agent/watchdog.js";
 
-const CLAUDE_BIN = "/home/claw/.npm-global/bin/claude";
+const CLAUDE_BIN = "claude";
 
 /**
  * Map a Claude Code stream-json JSONL event to a Linear activity.

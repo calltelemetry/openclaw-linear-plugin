@@ -1,6 +1,6 @@
 {
   "name": "@calltelemetry/openclaw-linear",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Linear Agent plugin for OpenClaw — webhook-driven AI pipeline with OAuth, multi-agent routing, and issue triage",
   "type": "module",
   "license": "MIT",

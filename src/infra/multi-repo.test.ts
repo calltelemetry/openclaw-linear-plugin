@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { homedir } from "node:os";
+import path from "node:path";
 import { resolveRepos, isMultiRepo, validateRepoPath, type RepoResolution } from "./multi-repo.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -46,12 +48,12 @@ describe("resolveRepos", () => {
   });
 
   it("falls back to config repos when no markers/labels", () => {
-    const config = { codexBaseRepo: "/home/claw/myproject" };
+    const config = { codexBaseRepo: "/tmp/test/myproject" };
     const result = resolveRepos("Plain description", [], config);
     expect(result.source).toBe("config_default");
     expect(result.repos).toHaveLength(1);
     expect(result.repos[0].name).toBe("default");
-    expect(result.repos[0].path).toBe("/home/claw/myproject");
+    expect(result.repos[0].path).toBe("/tmp/test/myproject");
   });
 
   it("body markers take priority over labels", () => {
@@ -69,7 +71,7 @@ describe("resolveRepos", () => {
     expect(result.source).toBe("config_default");
     expect(result.repos).toHaveLength(1);
     expect(result.repos[0].name).toBe("default");
-    expect(result.repos[0].path).toBe("/home/claw/ai-workspace");
+    expect(result.repos[0].path).toBe(path.join(homedir(), "ai-workspace"));
   });
 
   it("handles empty description + no labels (single repo fallback)", () => {
@@ -104,8 +106,8 @@ describe("isMultiRepo", () => {
   it("returns true for 2+ repos", () => {
     const resolution: RepoResolution = {
       repos: [
-        { name: "api", path: "/home/claw/api" },
-        { name: "frontend", path: "/home/claw/frontend" },
+        { name: "api", path: "/tmp/test/api" },
+        { name: "frontend", path: "/tmp/test/frontend" },
       ],
       source: "issue_body",
     };
@@ -114,7 +116,7 @@ describe("isMultiRepo", () => {
 
   it("returns false for 1 repo", () => {
     const resolution: RepoResolution = {
-      repos: [{ name: "default", path: "/home/claw/ai-workspace" }],
+      repos: [{ name: "default", path: "/tmp/test/ai-workspace" }],
       source: "config_default",
     };
     expect(isMultiRepo(resolution)).toBe(false);
@@ -143,21 +145,21 @@ describe("validateRepoPath", () => {
   it("returns isGitRepo:true, isSubmodule:false for normal repo (.git is directory)", () => {
     mockExistsSync.mockReturnValue(true);
     mockStatSync.mockReturnValue({ isFile: () => false, isDirectory: () => true });
-    const result = validateRepoPath("/home/claw/repos/api");
+    const result = validateRepoPath("/tmp/test/repos/api");
     expect(result).toEqual({ exists: true, isGitRepo: true, isSubmodule: false });
   });
 
   it("returns isGitRepo:true, isSubmodule:true for submodule (.git is file)", () => {
     mockExistsSync.mockReturnValue(true);
     mockStatSync.mockReturnValue({ isFile: () => true, isDirectory: () => false });
-    const result = validateRepoPath("/home/claw/workspace/submod");
+    const result = validateRepoPath("/tmp/test/workspace/submod");
     expect(result).toEqual({ exists: true, isGitRepo: true, isSubmodule: true });
   });
 
   it("returns isGitRepo:false for directory without .git", () => {
     // First call: path exists. Second call: .git does not exist
     mockExistsSync.mockImplementation((p: string) => !String(p).endsWith(".git"));
-    const result = validateRepoPath("/home/claw/not-a-repo");
+    const result = validateRepoPath("/tmp/test/not-a-repo");
     expect(result).toEqual({ exists: true, isGitRepo: false, isSubmodule: false });
   });
 });

@@ -26,6 +26,19 @@ export interface ActiveSession {
 // Keyed by issue ID — one active session per issue at a time.
 const sessions = new Map<string, ActiveSession>();
 
+// ---------------------------------------------------------------------------
+// Issue-agent affinity: tracks which agent last handled each issue.
+// Entries expire after a configurable TTL (default 30 min).
+// ---------------------------------------------------------------------------
+
+interface AffinityEntry {
+  agentId: string;
+  recordedAt: number;
+}
+
+const issueAgentAffinity = new Map<string, AffinityEntry>();
+let _affinityTtlMs = 30 * 60_000; // 30 minutes default
+
 /**
  * Register the active session for an issue. Idempotent — calling again
  * for the same issue just updates the session.
@@ -36,8 +49,13 @@ export function setActiveSession(session: ActiveSession): void {
 
 /**
  * Clear the active session for an issue.
+ * If the session had an agentId, records it as affinity for future routing.
  */
 export function clearActiveSession(issueId: string): void {
+  const session = sessions.get(issueId);
+  if (session?.agentId) {
+    recordIssueAffinity(issueId, session.agentId);
+  }
   sessions.delete(issueId);
 }
 
@@ -103,4 +121,46 @@ export async function hydrateFromDispatchState(configPath?: string): Promise<num
  */
 export function getSessionCount(): number {
   return sessions.size;
+}
+
+// ---------------------------------------------------------------------------
+// Issue-agent affinity — public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Record which agent last handled an issue.
+ * Called automatically from clearActiveSession when an agentId is present.
+ */
+export function recordIssueAffinity(issueId: string, agentId: string): void {
+  issueAgentAffinity.set(issueId, { agentId, recordedAt: Date.now() });
+}
+
+/**
+ * Look up which agent last handled an issue.
+ * Returns null if no affinity recorded or if the entry has expired.
+ */
+export function getIssueAffinity(issueId: string): string | null {
+  const entry = issueAgentAffinity.get(issueId);
+  if (!entry) return null;
+  if (Date.now() - entry.recordedAt > _affinityTtlMs) {
+    issueAgentAffinity.delete(issueId);
+    return null;
+  }
+  return entry.agentId;
+}
+
+/** @internal — configure affinity TTL from pluginConfig. */
+export function _configureAffinityTtl(ttlMs?: number): void {
+  _affinityTtlMs = ttlMs ?? 30 * 60_000;
+}
+
+/** @internal — read current affinity TTL (for testing). */
+export function _getAffinityTtlMs(): number {
+  return _affinityTtlMs;
+}
+
+/** @internal — test-only; clears all affinity state and resets TTL. */
+export function _resetAffinityForTesting(): void {
+  issueAgentAffinity.clear();
+  _affinityTtlMs = 30 * 60_000;
 }

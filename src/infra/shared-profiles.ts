@@ -7,6 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,7 +26,7 @@ export interface AgentProfile {
 // Cached profile loader (5s TTL)
 // ---------------------------------------------------------------------------
 
-const PROFILES_PATH = join(process.env.HOME ?? "/home/claw", ".openclaw", "agent-profiles.json");
+const PROFILES_PATH = join(homedir(), ".openclaw", "agent-profiles.json");
 
 let profilesCache: { data: Record<string, AgentProfile>; loadedAt: number } | null = null;
 const PROFILES_CACHE_TTL_MS = 5_000;

@@ -129,7 +129,7 @@ interface AgentProfileWatchdog {
   toolTimeoutSec?: number;
 }
 
-const PROFILES_PATH = join(process.env.HOME ?? "/home/claw", ".openclaw", "agent-profiles.json");
+const PROFILES_PATH = join(homedir(), ".openclaw", "agent-profiles.json");
 
 function loadProfileWatchdog(agentId: string): AgentProfileWatchdog | null {
   try {

@@ -8,6 +8,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 
 export interface RepoConfig {
@@ -62,7 +63,7 @@ export function resolveRepos(
   }
 
   // 3. Config default: single repo
-  const baseRepo = (pluginConfig?.codexBaseRepo as string) ?? "/home/claw/ai-workspace";
+  const baseRepo = (pluginConfig?.codexBaseRepo as string) ?? path.join(homedir(), "ai-workspace");
   return {
     repos: [{ name: "default", path: baseRepo }],
     source: "config_default",
@@ -76,7 +77,7 @@ function getRepoMap(pluginConfig?: Record<string, unknown>): Record<string, stri
 
 function resolveRepoPath(name: string, pluginConfig?: Record<string, unknown>): string {
   // Convention: {parentDir}/{name}
-  const baseRepo = (pluginConfig?.codexBaseRepo as string) ?? "/home/claw/ai-workspace";
+  const baseRepo = (pluginConfig?.codexBaseRepo as string) ?? path.join(homedir(), "ai-workspace");
   const parentDir = path.dirname(baseRepo);
   return path.join(parentDir, name);
 }

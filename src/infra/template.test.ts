@@ -62,9 +62,9 @@ describe("renderTemplate", () => {
     const result = renderTemplate(template, {
       identifier: "CT-42",
       title: "Implement auth",
-      worktreePath: "/home/claw/worktrees/ct-42",
+      worktreePath: "/tmp/test/worktrees/ct-42",
     });
-    expect(result).toBe("Issue: CT-42\nTitle: Implement auth\nWorktree: /home/claw/worktrees/ct-42");
+    expect(result).toBe("Issue: CT-42\nTitle: Implement auth\nWorktree: /tmp/test/worktrees/ct-42");
   });
 
   it("handles special regex characters in values", () => {

@@ -5,7 +5,7 @@ import path from "node:path";
 import { ensureGitignore } from "../pipeline/artifacts.js";
 import type { RepoConfig } from "./multi-repo.js";
 
-const DEFAULT_BASE_REPO = "/home/claw/ai-workspace";
+const DEFAULT_BASE_REPO = path.join(homedir(), "ai-workspace");
 const DEFAULT_WORKTREE_BASE_DIR = path.join(homedir(), ".openclaw", "worktrees");
 
 export interface WorktreeInfo {
@@ -22,7 +22,7 @@ export interface WorktreeStatus {
 }
 
 export interface WorktreeOptions {
-  /** Base git repo to create worktrees from. Default: /home/claw/ai-workspace */
+  /** Base git repo to create worktrees from. Default: ~/ai-workspace */
   baseRepo?: string;
   /** Directory under which worktrees are created. Default: ~/.openclaw/worktrees */
   baseDir?: string;

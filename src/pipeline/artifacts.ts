@@ -293,7 +293,7 @@ export function resolveOrchestratorWorkspace(
   api: any,
   pluginConfig?: Record<string, unknown>,
 ): string {
-  const home = process.env.HOME ?? "/home/claw";
+  const home = homedir();
   const agentId = (pluginConfig?.defaultAgentId as string) ?? "default";
 
   try {

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
@@ -15,7 +17,7 @@ interface AgentDirs {
 }
 
 function resolveAgentDirs(agentId: string, config: Record<string, any>): AgentDirs {
-  const home = process.env.HOME ?? "/home/claw";
+  const home = homedir();
   const agentList = config?.agents?.list as Array<Record<string, any>> | undefined;
   const agentEntry = agentList?.find((a) => a.id === agentId);
 
@@ -33,13 +35,13 @@ function resolveAgentDirs(agentId: string, config: Record<string, any>): AgentDi
 }
 
 // Import extensionAPI for embedded agent runner (internal, not in public SDK)
-let _extensionAPI: typeof import("/home/claw/.npm-global/lib/node_modules/openclaw/dist/extensionAPI.js") | null = null;
+let _extensionAPI: any | null = null;
 async function getExtensionAPI() {
   if (!_extensionAPI) {
-    // Dynamic import to avoid blocking module load if unavailable
-    _extensionAPI = await import(
-      "/home/claw/.npm-global/lib/node_modules/openclaw/dist/extensionAPI.js"
-    );
+    // Resolve the openclaw package location dynamically, then import extensionAPI
+    const _require = createRequire(import.meta.url);
+    const openclawDir = dirname(_require.resolve("openclaw/package.json"));
+    _extensionAPI = await import(join(openclawDir, "dist", "extensionAPI.js"));
   }
   return _extensionAPI;
 }

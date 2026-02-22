@@ -87,6 +87,9 @@ vi.mock("../pipeline/pipeline.js", () => ({
 vi.mock("../pipeline/active-session.js", () => ({
   setActiveSession: mockSetActiveSession,
   clearActiveSession: mockClearActiveSession,
+  getIssueAffinity: vi.fn().mockReturnValue(null),
+  _configureAffinityTtl: vi.fn(),
+  _resetAffinityForTesting: vi.fn(),
 }));
 
 vi.mock("../infra/observability.js", () => ({

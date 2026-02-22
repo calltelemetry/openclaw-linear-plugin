@@ -14,6 +14,9 @@ vi.mock("./dispatch-state.js", () => ({
 vi.mock("./active-session.js", () => ({
   setActiveSession: vi.fn(),
   clearActiveSession: vi.fn(),
+  getIssueAffinity: vi.fn().mockReturnValue(null),
+  _configureAffinityTtl: vi.fn(),
+  _resetAffinityForTesting: vi.fn(),
 }));
 vi.mock("../infra/notify.js", () => ({}));
 vi.mock("./artifacts.js", () => ({

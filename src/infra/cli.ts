@@ -846,8 +846,8 @@ async function reposAction(
     console.log(`\n  No "repos" configured in plugin config.`);
     console.log(`  Add a repos map to openclaw.json → plugins.entries.openclaw-linear.config:`);
     console.log(`\n    "repos": {`);
-    console.log(`      "api": "/home/claw/repos/api",`);
-    console.log(`      "frontend": "/home/claw/repos/frontend"`);
+    console.log(`      "api": "~/repos/api",`);
+    console.log(`      "frontend": "~/repos/frontend"`);
     console.log(`    }\n`);
     return;
   }

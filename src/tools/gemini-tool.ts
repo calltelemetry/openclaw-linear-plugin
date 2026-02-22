@@ -13,7 +13,7 @@ import {
 } from "./cli-shared.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "../agent/watchdog.js";
 
-const GEMINI_BIN = "/home/claw/.npm-global/bin/gemini";
+const GEMINI_BIN = "gemini";
 
 /**
  * Map a Gemini CLI stream-json JSONL event to a Linear activity.

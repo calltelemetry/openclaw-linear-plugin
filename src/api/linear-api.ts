@@ -1,11 +1,12 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { refreshLinearToken } from "./auth.js";
 import { withResilience } from "../infra/resilience.js";
 
 export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 export const AUTH_PROFILES_PATH = join(
-  process.env.HOME ?? "/home/claw",
+  homedir(),
   ".openclaw",
   "auth-profiles.json",
 );

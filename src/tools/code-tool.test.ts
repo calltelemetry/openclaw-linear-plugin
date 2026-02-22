@@ -17,6 +17,9 @@ vi.mock("./gemini-tool.js", () => ({
 }));
 vi.mock("../pipeline/active-session.js", () => ({
   getCurrentSession: vi.fn(() => null),
+  getIssueAffinity: vi.fn().mockReturnValue(null),
+  _configureAffinityTtl: vi.fn(),
+  _resetAffinityForTesting: vi.fn(),
 }));
 vi.mock("openclaw/plugin-sdk", () => ({
   jsonResult: vi.fn((v: unknown) => v),

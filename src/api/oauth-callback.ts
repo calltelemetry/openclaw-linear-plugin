@@ -2,10 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token";
 const AUTH_PROFILES_PATH = join(
-  process.env.HOME ?? "/home/claw",
+  homedir(),
   ".openclaw",
   "auth-profiles.json",
 );
