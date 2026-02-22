@@ -441,7 +441,7 @@ describe("Linear API smoke tests", () => {
       }
 
       expect(issue.id).toBe(sessionIssueId);
-    });
+    }, 20_000);
 
     it("Path B: createSessionOnIssue via OAuth (programmatic)", async () => {
       expect(sessionIssueId).toBeTruthy();
