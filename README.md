@@ -27,14 +27,14 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - [x] Complexity-tier dispatch (small → Haiku, medium → Sonnet, high → Opus)
 - [x] Isolated git worktrees per dispatch
 - [x] Worker → Auditor pipeline (hard-enforced, not LLM-mediated)
-- [x] Audit rework loop (gaps fed back, automatic retry)
+- [ ] Audit rework loop (gaps fed back, automatic retry)
 - [x] Watchdog timeout + escalation
 - [x] Webhook deduplication (60s sliding window across session/comment/assignment)
-- [x] Multi-repo worktree support
-- [x] Project planner (interview → user stories → sub-issues → DAG dispatch)
-- [x] Cross-model plan review (Claude ↔ Codex ↔ Gemini)
-- [x] Issue closure with summary report
-- [x] Sub-issue decomposition (orchestrator-level only)
+- [ ] Multi-repo worktree support
+- [ ] Project planner (interview → user stories → sub-issues → DAG dispatch)
+- [ ] Cross-model plan review (Claude ↔ Codex ↔ Gemini)
+- [ ] Issue closure with summary report
+- [ ] Sub-issue decomposition (orchestrator-level only)
 - [x] `spawn_agent` / `ask_agent` sub-agent tools
 - [x] CI + coverage badges (1000+ tests, Codecov integration)
 - [ ] **Worktree → PR merge** — `createPullRequest()` exists but is not wired into the pipeline. After audit pass, commits sit on a `codex/{identifier}` branch. You create the PR manually.
