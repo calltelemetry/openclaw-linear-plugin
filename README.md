@@ -28,7 +28,7 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - [x] Isolated git worktrees per dispatch
 - [x] Worker → Auditor pipeline (hard-enforced, not LLM-mediated)
 - [ ] Audit rework loop (gaps fed back, automatic retry)
-- [ ] Watchdog timeout + escalation
+- [x] Watchdog timeout + escalation
 - [x] Webhook deduplication (60s sliding window across session/comment/assignment)
 - [ ] Multi-repo worktree support
 - [ ] Project planner (interview → user stories → sub-issues → DAG dispatch)
