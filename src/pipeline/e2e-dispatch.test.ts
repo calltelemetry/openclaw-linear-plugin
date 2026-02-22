@@ -581,4 +581,139 @@ describe("E2E dispatch pipeline", () => {
       expect(call[0]).toBe("telegram-chat-1");
     }
   });
+
+  // =========================================================================
+  // Test 9: Watchdog kill → stuck with artifact verification
+  // =========================================================================
+  it("watchdog kill writes correct artifacts (log.jsonl, manifest)", async () => {
+    const hookCtx = makeHookCtx();
+    const dispatch = makeDispatch(worktree);
+
+    await registerDispatch(dispatch.issueIdentifier, dispatch, hookCtx.configPath);
+
+    // Pre-create manifest (as webhook.ts handleDispatch would)
+    const { ensureClawDir, writeManifest } = await import("./artifacts.js");
+    ensureClawDir(worktree);
+    writeManifest(worktree, {
+      issueIdentifier: "ENG-100",
+      issueId: "issue-1",
+      tier: "small",
+      status: "dispatched",
+      attempts: 0,
+      dispatchedAt: new Date().toISOString(),
+    });
+
+    hookCtx.mockLinearApi.getIssueDetails.mockResolvedValue(
+      makeIssueDetails({ id: "issue-1", identifier: "ENG-100", title: "Fix auth" }),
+    );
+
+    runAgentMock.mockResolvedValue({
+      success: false,
+      output: "partial work before timeout",
+      watchdogKilled: true,
+    });
+
+    await spawnWorker(hookCtx, dispatch);
+
+    // State should be stuck
+    const state = await readDispatchState(hookCtx.configPath);
+    expect(state.dispatches.active["ENG-100"].status).toBe("stuck");
+    expect(state.dispatches.active["ENG-100"].stuckReason).toBe("watchdog_kill_2x");
+
+    // Artifacts should exist
+    const clawDir = join(worktree, ".claw");
+    expect(existsSync(join(clawDir, "manifest.json"))).toBe(true);
+    expect(existsSync(join(clawDir, "log.jsonl"))).toBe(true);
+
+    // Manifest should reflect stuck status
+    const manifest = JSON.parse(readFileSync(join(clawDir, "manifest.json"), "utf8"));
+    expect(manifest.status).toBe("stuck");
+    expect(manifest.attempts).toBe(1);
+
+    // Log should contain watchdog phase entry
+    const logContent = readFileSync(join(clawDir, "log.jsonl"), "utf8");
+    const logLines = logContent.trim().split("\n").map((l) => JSON.parse(l));
+    const wdEntry = logLines.find((e) => e.phase === "watchdog");
+    expect(wdEntry).toBeDefined();
+    expect(wdEntry.success).toBe(false);
+    expect(wdEntry.watchdog).toBeDefined();
+    expect(wdEntry.watchdog.reason).toBe("inactivity");
+    expect(wdEntry.watchdog.retried).toBe(true);
+    expect(wdEntry.watchdog.thresholdSec).toBeGreaterThan(0);
+    expect(wdEntry.outputPreview).toBe("partial work before timeout");
+
+    // Should NOT have audit artifacts (no audit on watchdog kill)
+    expect(existsSync(join(clawDir, "audit-0.json"))).toBe(false);
+  });
+
+  // =========================================================================
+  // Test 10: Watchdog kill comment includes remediation steps
+  // =========================================================================
+  it("watchdog kill comment includes remediation guidance", async () => {
+    const hookCtx = makeHookCtx();
+    const dispatch = makeDispatch(worktree);
+
+    await registerDispatch(dispatch.issueIdentifier, dispatch, hookCtx.configPath);
+
+    hookCtx.mockLinearApi.getIssueDetails.mockResolvedValue(
+      makeIssueDetails({ id: "issue-1", identifier: "ENG-100", title: "Fix auth" }),
+    );
+
+    runAgentMock.mockResolvedValue({
+      success: false,
+      output: "",
+      watchdogKilled: true,
+    });
+
+    await spawnWorker(hookCtx, dispatch);
+
+    // Comment should include all remediation steps
+    const commentCall = hookCtx.mockLinearApi.createComment.mock.calls[0];
+    expect(commentCall).toBeDefined();
+    const [issueId, comment] = commentCall;
+    expect(issueId).toBe("issue-1");
+    expect(comment).toContain("Agent Timed Out");
+    expect(comment).toContain("Try again");
+    expect(comment).toContain("/dispatch retry ENG-100");
+    expect(comment).toContain("Break it down");
+    expect(comment).toContain("Increase timeout");
+    expect(comment).toContain("inactivitySec");
+    expect(comment).toContain("log.jsonl");
+    expect(comment).toContain("Stuck — waiting for you");
+  });
+
+  // =========================================================================
+  // Test 11: Watchdog notification payload shape
+  // =========================================================================
+  it("watchdog kill sends notification with correct payload", async () => {
+    const hookCtx = makeHookCtx();
+    const dispatch = makeDispatch(worktree);
+
+    await registerDispatch(dispatch.issueIdentifier, dispatch, hookCtx.configPath);
+
+    hookCtx.mockLinearApi.getIssueDetails.mockResolvedValue(
+      makeIssueDetails({ id: "issue-1", identifier: "ENG-100", title: "Fix auth" }),
+    );
+
+    runAgentMock.mockResolvedValue({
+      success: false,
+      output: "",
+      watchdogKilled: true,
+    });
+
+    await spawnWorker(hookCtx, dispatch);
+
+    // Find the watchdog_kill notification
+    const wdNotify = hookCtx.notifyCalls.find(([k]) => k === "watchdog_kill");
+    expect(wdNotify).toBeDefined();
+    const [kind, payload] = wdNotify!;
+    expect(kind).toBe("watchdog_kill");
+    expect(payload).toMatchObject({
+      identifier: "ENG-100",
+      title: "Fix auth",
+      status: "stuck",
+      attempt: 0,
+    });
+    expect((payload as any).reason).toMatch(/no I\/O for \d+s/);
+  });
 });

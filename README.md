@@ -1488,7 +1488,7 @@ This is separate from the main `doctor` because each live test spawns a real CLI
 
 ### Unit tests
 
-551 tests covering the full pipeline — triage, dispatch, audit, planning, intent classification, native issue tools, cross-model review, notifications, and infrastructure:
+1000+ tests covering the full pipeline — triage, dispatch, audit, planning, intent classification, native issue tools, cross-model review, notifications, watchdog, and infrastructure:
 
 ```bash
 cd ~/claw-extensions/linear

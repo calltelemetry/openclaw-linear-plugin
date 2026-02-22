@@ -1538,4 +1538,83 @@ describe("spawnWorker (error branch coverage)", () => {
     );
     expect(clearActiveSession).toHaveBeenCalled();
   });
+
+  it("watchdog kill writes log entry with correct shape", async () => {
+    (runAgent as any).mockResolvedValue({
+      success: false,
+      output: "partial output before hang",
+      watchdogKilled: true,
+    });
+    const ctx = makeHookCtx();
+    const dispatch = makeDispatch({ status: "working" as any });
+
+    await spawnWorker(ctx, dispatch);
+
+    // appendLog should be called with watchdog phase
+    expect(appendLog).toHaveBeenCalledWith(
+      dispatch.worktreePath,
+      expect.objectContaining({
+        phase: "watchdog",
+        attempt: dispatch.attempt,
+        prompt: "(watchdog kill)",
+        success: false,
+        watchdog: expect.objectContaining({
+          reason: "inactivity",
+          retried: true,
+          thresholdSec: expect.any(Number),
+        }),
+      }),
+    );
+
+    // Verify output preview is included
+    const logCall = (appendLog as any).mock.calls.find(
+      (c: any[]) => c[1]?.phase === "watchdog",
+    );
+    expect(logCall).toBeDefined();
+    expect(logCall[1].outputPreview).toBe("partial output before hang");
+    expect(logCall[1].durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("watchdog kill updates manifest to stuck", async () => {
+    (runAgent as any).mockResolvedValue({
+      success: false,
+      output: "",
+      watchdogKilled: true,
+    });
+    const ctx = makeHookCtx();
+    const dispatch = makeDispatch({ status: "working" as any });
+
+    await spawnWorker(ctx, dispatch);
+
+    expect(updateManifest).toHaveBeenCalledWith(
+      dispatch.worktreePath,
+      { status: "stuck", attempts: dispatch.attempt + 1 },
+    );
+  });
+
+  it("watchdog kill does not trigger audit", async () => {
+    (runAgent as any).mockResolvedValue({
+      success: false,
+      output: "",
+      watchdogKilled: true,
+    });
+    const ctx = makeHookCtx();
+    const dispatch = makeDispatch({ status: "working" as any });
+
+    await spawnWorker(ctx, dispatch);
+
+    // runAgent should only be called ONCE (for the worker)
+    // NOT a second time (no audit spawned)
+    expect(runAgent).toHaveBeenCalledTimes(1);
+
+    // No audit artifacts should be saved
+    expect(saveAuditVerdict).not.toHaveBeenCalled();
+
+    // Transition should be to stuck, never to auditing
+    expect(transitionDispatch).toHaveBeenCalledWith(
+      "ENG-100", "working", "stuck",
+      expect.objectContaining({ stuckReason: "watchdog_kill_2x" }),
+      expect.any(String),
+    );
+  });
 });
