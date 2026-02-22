@@ -42,9 +42,16 @@ let _affinityTtlMs = 30 * 60_000; // 30 minutes default
 /**
  * Register the active session for an issue. Idempotent — calling again
  * for the same issue just updates the session.
+ *
+ * Also eagerly records agent affinity so that follow-up webhooks arriving
+ * during or after the run resolve to the correct agent — even if the
+ * gateway restarts before clearActiveSession is called.
  */
 export function setActiveSession(session: ActiveSession): void {
   sessions.set(session.issueId, session);
+  if (session.agentId) {
+    recordIssueAffinity(session.issueId, session.agentId);
+  }
 }
 
 /**

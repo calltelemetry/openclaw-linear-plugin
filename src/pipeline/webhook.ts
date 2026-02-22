@@ -484,10 +484,10 @@ export async function handleLinearWebhook(
     activeRuns.add(issue.id);
     void (async () => {
       const profiles = loadAgentProfiles();
-      const defaultProfile = Object.entries(profiles).find(([, p]) => p.isDefault);
-      const label = defaultProfile?.[1]?.label ?? profiles[agentId]?.label ?? agentId;
+      const label = profiles[agentId]?.label ?? agentId;
 
       // Register active session for tool resolution (code_run, etc.)
+      // Also eagerly records affinity so follow-ups route to the same agent.
       setActiveSession({
         agentSessionId: session.id,
         issueIdentifier: enrichedIssue?.identifier ?? issue.identifier ?? issue.id,
@@ -531,7 +531,7 @@ export async function handleLinearWebhook(
         }).then(() => true).catch(() => false);
 
         if (!emitted) {
-          const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
+          const avatarUrl = profiles[agentId]?.avatarUrl;
           const agentOpts = avatarUrl
             ? { createAsUser: label, displayIconUrl: avatarUrl }
             : undefined;
@@ -648,8 +648,7 @@ export async function handleLinearWebhook(
     activeRuns.add(issue.id);
     void (async () => {
       const profiles = loadAgentProfiles();
-      const defaultProfile = Object.entries(profiles).find(([, p]) => p.isDefault);
-      const label = defaultProfile?.[1]?.label ?? profiles[agentId]?.label ?? agentId;
+      const label = profiles[agentId]?.label ?? agentId;
 
       // Fetch full issue details for context
       let enrichedIssue: any = issue;
@@ -764,7 +763,7 @@ export async function handleLinearWebhook(
         }).then(() => true).catch(() => false);
 
         if (!emitted) {
-          const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
+          const avatarUrl = profiles[agentId]?.avatarUrl;
           const agentOpts = avatarUrl
             ? { createAsUser: label, displayIconUrl: avatarUrl }
             : undefined;
@@ -1150,9 +1149,8 @@ export async function handleLinearWebhook(
     // Dispatch triage (non-blocking)
     void (async () => {
       const profiles = loadAgentProfiles();
-      const defaultProfile = Object.entries(profiles).find(([, p]) => p.isDefault);
-      const label = defaultProfile?.[1]?.label ?? profiles[agentId]?.label ?? agentId;
-      const avatarUrl = defaultProfile?.[1]?.avatarUrl ?? profiles[agentId]?.avatarUrl;
+      const label = profiles[agentId]?.label ?? agentId;
+      const avatarUrl = profiles[agentId]?.avatarUrl;
       let agentSessionId: string | null = null;
 
       try {

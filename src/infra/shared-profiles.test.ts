@@ -4,12 +4,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Mocks
 // ---------------------------------------------------------------------------
 
-const { mockReadFileSync } = vi.hoisted(() => ({
+const { mockReadFileSync, mockWriteFileSync, mockMkdirSync, mockExistsSync } = vi.hoisted(() => ({
   mockReadFileSync: vi.fn(),
+  mockWriteFileSync: vi.fn(),
+  mockMkdirSync: vi.fn(),
+  mockExistsSync: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock("node:fs", () => ({
   readFileSync: mockReadFileSync,
+  writeFileSync: mockWriteFileSync,
+  mkdirSync: mockMkdirSync,
+  existsSync: mockExistsSync,
 }));
 
 // ---------------------------------------------------------------------------
@@ -21,6 +27,9 @@ import {
   buildMentionPattern,
   resolveAgentFromAlias,
   resolveDefaultAgent,
+  createAgentProfilesFile,
+  validateProfiles,
+  PROFILES_PATH,
   _resetProfilesCacheForTesting,
   type AgentProfile,
 } from "./shared-profiles.js";
@@ -61,6 +70,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   _resetProfilesCacheForTesting();
   mockReadFileSync.mockReturnValue(PROFILES_JSON);
+  mockExistsSync.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -258,5 +268,117 @@ describe("resolveDefaultAgent", () => {
     const result = resolveDefaultAgent(api);
     // Should fall through to profile default
     expect(result).toBe("mal");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createAgentProfilesFile
+// ---------------------------------------------------------------------------
+
+describe("createAgentProfilesFile", () => {
+  it("writes correct JSON structure to PROFILES_PATH", () => {
+    createAgentProfilesFile({
+      agentId: "bobbin",
+      label: "Bobbin",
+      mentionAliases: ["bobbin", "bob"],
+    });
+
+    expect(mockMkdirSync).toHaveBeenCalledTimes(1);
+    expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+
+    const [path, content] = mockWriteFileSync.mock.calls[0];
+    expect(path).toBe(PROFILES_PATH);
+
+    const parsed = JSON.parse(content);
+    expect(parsed.agents.bobbin).toEqual({
+      label: "Bobbin",
+      mission: "AI assistant for Linear issues",
+      isDefault: true,
+      mentionAliases: ["bobbin", "bob"],
+    });
+  });
+
+  it("uses custom mission when provided", () => {
+    createAgentProfilesFile({
+      agentId: "claw",
+      label: "The Claw",
+      mentionAliases: ["claw"],
+      mission: "Code review specialist",
+    });
+
+    const [, content] = mockWriteFileSync.mock.calls[0];
+    const parsed = JSON.parse(content);
+    expect(parsed.agents.claw.mission).toBe("Code review specialist");
+  });
+
+  it("creates parent directory recursively", () => {
+    createAgentProfilesFile({
+      agentId: "test",
+      label: "Test",
+      mentionAliases: ["test"],
+    });
+
+    expect(mockMkdirSync).toHaveBeenCalledWith(
+      expect.any(String),
+      { recursive: true },
+    );
+  });
+
+  it("busts the profile cache", () => {
+    // Load to populate cache
+    loadAgentProfiles();
+    expect(mockReadFileSync).toHaveBeenCalledTimes(1);
+
+    // Create a new profile — should bust cache
+    createAgentProfilesFile({
+      agentId: "fresh",
+      label: "Fresh",
+      mentionAliases: ["fresh"],
+    });
+
+    // Next load should re-read from disk (cache was busted)
+    loadAgentProfiles();
+    expect(mockReadFileSync).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateProfiles
+// ---------------------------------------------------------------------------
+
+describe("validateProfiles", () => {
+  it("returns error when file is missing", () => {
+    mockExistsSync.mockReturnValue(false);
+
+    const result = validateProfiles();
+    expect(result).not.toBeNull();
+    expect(result).toContain("not found");
+    expect(result).toContain("openclaw openclaw-linear setup");
+  });
+
+  it("returns null when file is valid with agents", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(PROFILES_JSON);
+
+    const result = validateProfiles();
+    expect(result).toBeNull();
+  });
+
+  it("returns error when JSON is invalid", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockImplementation(() => { throw new SyntaxError("Unexpected token"); });
+
+    const result = validateProfiles();
+    expect(result).not.toBeNull();
+    expect(result).toContain("could not be parsed");
+  });
+
+  it("returns error when agents object is empty", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(JSON.stringify({ agents: {} }));
+
+    const result = validateProfiles();
+    expect(result).not.toBeNull();
+    expect(result).toContain("no agents configured");
   });
 });
