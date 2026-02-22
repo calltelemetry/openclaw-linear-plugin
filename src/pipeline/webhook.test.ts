@@ -24,9 +24,6 @@ const {
   resetGuidanceCacheMock,
   setActiveSessionMock,
   clearActiveSessionMock,
-  getIssueAffinityMock,
-  configureAffinityTtlMock,
-  resetAffinityForTestingMock,
   readDispatchStateMock,
   getActiveDispatchMock,
   registerDispatchMock,
@@ -100,9 +97,6 @@ const {
   resetGuidanceCacheMock: vi.fn(),
   setActiveSessionMock: vi.fn(),
   clearActiveSessionMock: vi.fn(),
-  getIssueAffinityMock: vi.fn().mockReturnValue(null),
-  configureAffinityTtlMock: vi.fn(),
-  resetAffinityForTestingMock: vi.fn(),
   readDispatchStateMock: vi.fn().mockResolvedValue({ activeDispatches: {} }),
   getActiveDispatchMock: vi.fn().mockReturnValue(null),
   registerDispatchMock: vi.fn().mockResolvedValue(undefined),
@@ -113,7 +107,7 @@ const {
   createWorktreeMock: vi.fn().mockReturnValue({ path: "/tmp/worktree", branch: "codex/ENG-123", resumed: false }),
   createMultiWorktreeMock: vi.fn().mockReturnValue({ parentPath: "/tmp/multi", worktrees: [] }),
   prepareWorkspaceMock: vi.fn().mockReturnValue({ pulled: true, submodulesInitialized: false, errors: [] }),
-  resolveReposMock: vi.fn().mockReturnValue({ repos: [{ name: "main", path: "/tmp/test/workspace" }], source: "config_default" }),
+  resolveReposMock: vi.fn().mockReturnValue({ repos: [{ name: "main", path: "/home/claw/ai-workspace" }], source: "config_default" }),
   isMultiRepoMock: vi.fn().mockReturnValue(false),
   ensureClawDirMock: vi.fn(),
   writeManifestMock: vi.fn(),
@@ -173,9 +167,9 @@ vi.mock("./guidance.js", () => ({
 vi.mock("./active-session.js", () => ({
   setActiveSession: setActiveSessionMock,
   clearActiveSession: clearActiveSessionMock,
-  getIssueAffinity: getIssueAffinityMock,
-  _configureAffinityTtl: configureAffinityTtlMock,
-  _resetAffinityForTesting: resetAffinityForTestingMock,
+  getIssueAffinity: vi.fn().mockReturnValue(null),
+  _configureAffinityTtl: vi.fn(),
+  _resetAffinityForTesting: vi.fn(),
 }));
 
 vi.mock("./dispatch-state.js", () => ({
@@ -364,9 +358,6 @@ afterEach(() => {
   isGuidanceEnabledMock.mockReset().mockReturnValue(false);
   setActiveSessionMock.mockReset();
   clearActiveSessionMock.mockReset();
-  getIssueAffinityMock.mockReset().mockReturnValue(null);
-  configureAffinityTtlMock.mockReset();
-  resetAffinityMock.mockReset();
   readDispatchStateMock.mockReset().mockResolvedValue({ activeDispatches: {} });
   getActiveDispatchMock.mockReset().mockReturnValue(null);
   registerDispatchMock.mockReset().mockResolvedValue(undefined);
@@ -375,7 +366,7 @@ afterEach(() => {
   assessTierMock.mockReset().mockResolvedValue({ tier: "medium", model: "anthropic/claude-sonnet-4-6", reasoning: "moderate complexity" });
   createWorktreeMock.mockReset().mockReturnValue({ path: "/tmp/worktree", branch: "codex/ENG-123", resumed: false });
   prepareWorkspaceMock.mockReset().mockReturnValue({ pulled: true, submodulesInitialized: false, errors: [] });
-  resolveReposMock.mockReset().mockReturnValue({ repos: [{ name: "main", path: "/tmp/test/workspace" }], source: "config_default" });
+  resolveReposMock.mockReset().mockReturnValue({ repos: [{ name: "main", path: "/home/claw/ai-workspace" }], source: "config_default" });
   isMultiRepoMock.mockReset().mockReturnValue(false);
   ensureClawDirMock.mockReset();
   writeManifestMock.mockReset();
@@ -4276,8 +4267,8 @@ describe("handleDispatch multi-repo and .catch/.finally", () => {
     });
     resolveReposMock.mockReturnValue({
       repos: [
-        { name: "api", path: "/tmp/test/api" },
-        { name: "spa", path: "/tmp/test/spa" },
+        { name: "api", path: "/home/claw/api" },
+        { name: "spa", path: "/home/claw/spa" },
       ],
       source: "issue_markers",
     });
