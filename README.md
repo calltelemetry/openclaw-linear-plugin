@@ -33,7 +33,7 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - [ ] Multi-repo worktree support
 - [ ] Project planner (interview → user stories → sub-issues → DAG dispatch)
 - [ ] Cross-model plan review (Claude ↔ Codex ↔ Gemini)
-- [ ] Issue closure with summary report
+- [x] Issue closure with summary report
 - [ ] Sub-issue decomposition (orchestrator-level only)
 - [x] `spawn_agent` / `ask_agent` sub-agent tools
 - [x] CI + coverage badges (1000+ tests, Codecov integration)
