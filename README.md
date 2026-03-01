@@ -41,7 +41,9 @@ Connect Linear to AI agents. Issues get triaged, implemented, and audited — au
 - [x] CI + coverage badges (1170+ tests, Codecov integration)
 - [x] Setup wizard (`openclaw openclaw-linear setup`) + `doctor --fix` auto-repair
 - [x] Project context auto-detection (repo, framework, build/test commands → worker/audit prompts)
-- [x] Per-backend CLI tools (`cli_codex`, `cli_claude`, `cli_gemini`) with Linear session activity streaming
+- [x] Per-backend CLI tools (`cli_codex`, `cli_claude`, `cli_gemini`) with `[Codex]`/`[Claude]`/`[Gemini]`-prefixed Linear session activity streaming
+- [x] Immediate thought emission on comment receipt and tool dispatch (visible before long-running tasks complete)
+- [x] Proactive OAuth token refresh timer (runs on startup, then every 6h)
 - [ ] **Worktree → PR merge** — `createPullRequest()` exists but is not wired into the pipeline. After audit pass, commits sit on a `codex/{identifier}` branch. You create the PR manually.
 - [ ] **Sub-agent worktree sharing** — Sub-agents spawned via `spawn_agent`/`ask_agent` do not inherit the parent worktree. They run in their own session without code access.
 - [ ] **Parallel worktree conflict resolution** — DAG dispatch runs up to 3 issues concurrently in separate worktrees, but there's no merge conflict detection across them.
@@ -118,7 +120,7 @@ The end result: you work in Linear. You create issues, assign them, comment in p
 
 ### Multi-Backend & Multi-Repo
 
-- **Three coding backends** — Codex (OpenAI), Claude (Anthropic), Gemini (Google). Configurable globally or per-agent. Each backend registers as a dedicated tool (`cli_codex`, `cli_claude`, `cli_gemini`) so agents and Linear session UI show exactly which backend is running. Per-agent overrides let you assign different backends to different team members.
+- **Three coding backends** — Codex (OpenAI), Claude (Anthropic), Gemini (Google). Configurable globally or per-agent. Each backend registers as a dedicated tool (`cli_codex`, `cli_claude`, `cli_gemini`) with `[Codex]`/`[Claude]`/`[Gemini]`-prefixed activity streaming — thoughts, actions, progress, and results all show the backend label in Linear's session UI so you always know which runner is active. Per-agent overrides let you assign different backends to different team members.
 - **Multi-repo dispatch** — Tag an issue with `<!-- repos: api, frontend -->` and the worker gets isolated worktrees for each repo. One issue, multiple codebases, one agent session.
 
 ### Operations
@@ -1303,7 +1305,7 @@ Every agent session gets these registered tools. They're available as native too
 
 ### `cli_codex` / `cli_claude` / `cli_gemini` — Coding backend tools
 
-Three per-backend tools that send tasks to their respective coding CLIs. Each agent sees only the tool matching its configured backend (e.g., an agent configured for `codex` gets `cli_codex`). The tool name is visible in Linear's agent session UI, so you always know which backend is running. The agent writes the prompt; the plugin handles worktree setup, session activity streaming, and output capture.
+Three per-backend tools that send tasks to their respective coding CLIs. Each agent sees only the tool matching its configured backend (e.g., an agent configured for `codex` gets `cli_codex`). All activity emissions are prefixed with the backend label (`[Codex]`, `[Claude]`, `[Gemini]`) — thoughts, action starts, progress updates, results, and errors — so the Linear session UI always shows which runner is active. When a CLI tool is dispatched, an immediate thought is emitted with the prompt excerpt before the long-running task begins. The agent writes the prompt; the plugin handles worktree setup, session activity streaming, and output capture.
 
 ### `linear_issues` — Native Linear API
 

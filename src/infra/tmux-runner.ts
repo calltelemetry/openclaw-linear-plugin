@@ -119,6 +119,7 @@ export async function runInTmux(opts: RunInTmuxOptions): Promise<CliResult> {
       let killed = false;
       let killedByWatchdog = false;
       let resolved = false;
+      let completionEventReceived = false;
       const collectedMessages: string[] = [];
 
       const timer = setTimeout(() => {
@@ -175,8 +176,15 @@ export async function runInTmux(opts: RunInTmuxOptions): Promise<CliResult> {
             output: `Agent timed out after ${Math.round(timeoutMs / 1000)}s. Partial output:\n${output}`,
             error: "timeout",
           });
+        } else if (reason === "unexpected_exit") {
+          logger.warn(`tmux session ${sessionName} exited without completion event`);
+          resolve({
+            success: false,
+            output: `Agent session exited unexpectedly (no completion event received). Partial output:\n${output}`,
+            error: "unexpected_exit",
+          });
         } else {
-          // Normal completion
+          // Normal completion — only reached when completionEventReceived is true
           resolve({ success: true, output });
         }
       }
@@ -225,6 +233,7 @@ export async function runInTmux(opts: RunInTmuxOptions): Promise<CliResult> {
 
         // Detect completion — Claude uses "result", Codex uses "session.completed"
         if (event.type === "result" || event.type === "session.completed") {
+          completionEventReceived = true;
           cleanup("done");
           rl.close();
         }
@@ -233,7 +242,12 @@ export async function runInTmux(opts: RunInTmuxOptions): Promise<CliResult> {
       // Handle tail process ending (tmux session exited)
       tail.on("close", () => {
         if (!resolved) {
-          cleanup("done");
+          // If we never saw a completion event, the session died unexpectedly
+          if (completionEventReceived) {
+            cleanup("done");
+          } else {
+            cleanup("unexpected_exit");
+          }
         }
         rl.close();
       });

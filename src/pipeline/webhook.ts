@@ -1731,11 +1731,12 @@ async function dispatchCommentToAgent(
       });
     }
 
-    // Emit thought
+    // Emit thought — include comment excerpt so the user sees immediate context
     if (agentSessionId) {
+      const excerpt = commentBody.length > 200 ? commentBody.slice(0, 200) + "..." : commentBody;
       await linearApi.emitActivity(agentSessionId, {
         type: "thought",
-        body: `${label} is processing comment on ${issueRef}...`,
+        body: `${label} received comment on ${issueRef}: "${excerpt}" — working on it now...`,
       }).catch(() => {});
     }
 

@@ -293,6 +293,8 @@ async function runEmbedded(
 
   // Track last emitted tool to avoid duplicates
   let lastToolAction = "";
+  // Derive a friendly label from cli_ tool names: cli_codex→"Codex", cli_claude→"Claude"
+  const cliLabel = (name: string) => name.startsWith("cli_") ? name.slice(4).charAt(0).toUpperCase() + name.slice(5) : name;
 
   watchdog.start();
 
@@ -335,7 +337,8 @@ async function runEmbedded(
       if (text) {
         // Truncate tool results for activity display
         const truncated = text.length > 300 ? text.slice(0, 300) + "..." : text;
-        emit({ type: "action", action: lastToolAction || "Tool result", parameter: truncated });
+        const prefix = lastToolAction.startsWith("cli_") ? `[${cliLabel(lastToolAction)}] ` : "";
+        emit({ type: "action", action: `${prefix}${lastToolAction || "Tool result"}`, parameter: truncated });
       }
     },
 
@@ -364,11 +367,14 @@ async function runEmbedded(
       if (phase === "start") {
         lastToolAction = toolName;
 
-        // cli_codex / cli_claude / cli_gemini: show working dir and prompt excerpt
+        // cli_codex / cli_claude / cli_gemini: emit a thought + action so the
+        // user immediately sees what the agent is dispatching and why.
         if (toolName.startsWith("cli_") && inputObj) {
+          const tag = cliLabel(toolName);
           const prompt = String(inputObj.prompt ?? "").slice(0, 250);
           const workDir = inputObj.workingDir ? ` in ${inputObj.workingDir}` : "";
-          emit({ type: "action", action: `Running ${toolName}${workDir}`, parameter: prompt });
+          emit({ type: "thought", body: `[${tag}] Starting${workDir}: "${prompt}"\n\n${toolName}\nin progress` });
+          emit({ type: "action", action: `[${tag}] Running${workDir}`, parameter: prompt });
         } else {
           const detail = input || meta || toolName;
           emit({ type: "action", action: `Running ${toolName}`, parameter: detail.slice(0, 300) });
@@ -378,18 +384,21 @@ async function runEmbedded(
       // Tool execution update — partial progress (keeps Linear UI alive for long tools)
       if (phase === "update") {
         const detail = meta || input || "in progress";
-        emit({ type: "action", action: `${toolName}`, parameter: detail.slice(0, 300) });
+        const prefix = toolName.startsWith("cli_") ? `[${cliLabel(toolName)}] ` : "";
+        emit({ type: "action", action: `${prefix}${toolName}`, parameter: detail.slice(0, 300) });
       }
 
       // Tool execution completed successfully
       if (phase === "result" && !data.isError) {
         const detail = meta ? meta.slice(0, 300) : "completed";
-        emit({ type: "action", action: `${toolName} done`, parameter: detail });
+        const prefix = toolName.startsWith("cli_") ? `[${cliLabel(toolName)}] ` : "";
+        emit({ type: "action", action: `${prefix}${toolName} done`, parameter: detail });
       }
 
       // Tool execution result with error
       if (phase === "result" && data.isError) {
-        emit({ type: "action", action: `${toolName} failed`, parameter: (meta || "error").slice(0, 300) });
+        const prefix = toolName.startsWith("cli_") ? `[${cliLabel(toolName)}] ` : "";
+        emit({ type: "action", action: `${prefix}${toolName} failed`, parameter: (meta || "error").slice(0, 300) });
       }
     },
 
