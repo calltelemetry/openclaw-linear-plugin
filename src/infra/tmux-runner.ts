@@ -8,6 +8,14 @@ import { formatActivityLogLine, createProgressEmitter } from "../tools/cli-share
 import { InactivityWatchdog } from "../agent/watchdog.js";
 import { shellEscape } from "./tmux.js";
 
+const COMPLETION_EVENT_TYPES = new Set([
+  "result",
+  "session.completed",
+  "task_completed",
+  "task.completed",
+  "task_completion",
+]);
+
 export interface TmuxSession {
   sessionName: string;
   backend: string;
@@ -36,6 +44,24 @@ export interface RunInTmuxOptions {
 
 // Track active tmux sessions by issueId
 const activeSessions = new Map<string, TmuxSession>();
+
+/**
+ * Completion detector for streamed CLI JSONL events.
+ * Supports Claude and Codex event variants across releases.
+ */
+export function isCompletionEvent(event: any): boolean {
+  const type = typeof event?.type === "string" ? event.type.trim().toLowerCase() : "";
+  if (type && COMPLETION_EVENT_TYPES.has(type)) {
+    return true;
+  }
+
+  const itemType = typeof event?.item?.type === "string" ? event.item.type.trim().toLowerCase() : "";
+  if (itemType && COMPLETION_EVENT_TYPES.has(itemType)) {
+    return true;
+  }
+
+  return event?.session?.completed === true;
+}
 
 /**
  * Get the active tmux session for a given issueId, or null if none.
@@ -231,8 +257,8 @@ export async function runInTmux(opts: RunInTmuxOptions): Promise<CliResult> {
           progress.push(formatActivityLogLine(activity));
         }
 
-        // Detect completion — Claude uses "result", Codex uses "session.completed"
-        if (event.type === "result" || event.type === "session.completed") {
+        // Detect completion across known CLI event shapes.
+        if (isCompletionEvent(event)) {
           completionEventReceived = true;
           cleanup("done");
           rl.close();

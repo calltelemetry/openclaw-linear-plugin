@@ -20,6 +20,51 @@ import { createDispatchHistoryTool } from "./src/tools/dispatch-history-tool.js"
 import { readDispatchState as readStateForHook, listActiveDispatches as listActiveForHook } from "./src/pipeline/dispatch-state.js";
 import { startTokenRefreshTimer, stopTokenRefreshTimer } from "./src/infra/token-refresh-timer.js";
 
+const COMPLETION_HOOK_NAMES = ["agent_end", "task_completed", "task_completion"] as const;
+const SUCCESS_STATUSES = new Set(["ok", "success", "completed", "complete", "done", "pass", "passed"]);
+const FAILURE_STATUSES = new Set(["error", "failed", "failure", "timeout", "timed_out", "cancelled", "canceled", "aborted", "unknown"]);
+
+function parseCompletionSuccess(event: any): boolean {
+  if (typeof event?.success === "boolean") {
+    return event.success;
+  }
+  const status = typeof event?.status === "string" ? event.status.trim().toLowerCase() : "";
+  if (status) {
+    if (SUCCESS_STATUSES.has(status)) return true;
+    if (FAILURE_STATUSES.has(status)) return false;
+  }
+  if (typeof event?.error === "string" && event.error.trim().length > 0) {
+    return false;
+  }
+  return true;
+}
+
+function extractCompletionOutput(event: any): string {
+  if (typeof event?.output === "string" && event.output.trim().length > 0) {
+    return event.output;
+  }
+  if (typeof event?.result === "string" && event.result.trim().length > 0) {
+    return event.result;
+  }
+
+  const assistantBlocks = (event?.messages ?? [])
+    .filter((m: any) => m?.role === "assistant")
+    .flatMap((m: any) => {
+      if (typeof m?.content === "string") {
+        return [m.content];
+      }
+      if (Array.isArray(m?.content)) {
+        return m.content
+          .filter((b: any) => b?.type === "text" && typeof b?.text === "string")
+          .map((b: any) => b.text);
+      }
+      return [];
+    })
+    .filter((value: string) => value.trim().length > 0);
+
+  return assistantBlocks.join("\n");
+}
+
 export default function register(api: OpenClawPluginApi) {
   const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
 
@@ -95,17 +140,19 @@ export default function register(api: OpenClawPluginApi) {
   }).catch((err) => api.logger.warn(`Planning state hydration failed: ${err}`));
 
   // ---------------------------------------------------------------------------
-  // Dispatch pipeline v2: notifier + agent_end lifecycle hook
+  // Dispatch pipeline v2: notifier + completion lifecycle hooks
   // ---------------------------------------------------------------------------
 
   // Instantiate notifier (Discord, Slack, or both — config-driven)
   const notify: NotifyFn = createNotifierFromConfig(pluginConfig, api.runtime, api);
 
-  // Register agent_end hook — safety net for sessions_spawn sub-agents.
-  // In the current implementation, the worker→audit→verdict flow runs inline
-  // via spawnWorker() in pipeline.ts. This hook catches sessions_spawn agents
-  // (future upgrade path) and serves as a recovery mechanism.
-  api.on("agent_end", async (event: any, ctx: any) => {
+  // Register completion hooks — safety net for sessions_spawn sub-agents.
+  // In the current implementation, the worker->audit->verdict flow runs inline
+  // via spawnWorker() in pipeline.ts. These hooks catch sessions_spawn agents
+  // (future upgrade path) and serve as a recovery mechanism.
+  const onAnyHook = api.on as unknown as (hookName: string, handler: (event: any, ctx: any) => Promise<void> | void) => void;
+
+  const handleCompletionEvent = async (event: any, ctx: any, hookName: string) => {
     try {
       const sessionKey = ctx?.sessionKey ?? "";
       if (!sessionKey) return;
@@ -117,14 +164,14 @@ export default function register(api: OpenClawPluginApi) {
 
       const dispatch = getActiveDispatch(state, mapping.dispatchId);
       if (!dispatch) {
-        api.logger.info(`agent_end: dispatch ${mapping.dispatchId} no longer active`);
+        api.logger.info(`${hookName}: dispatch ${mapping.dispatchId} no longer active`);
         return;
       }
 
       // Stale event rejection — only process if attempt matches
       if (dispatch.attempt !== mapping.attempt) {
         api.logger.info(
-          `agent_end: stale event for ${mapping.dispatchId} ` +
+          `${hookName}: stale event for ${mapping.dispatchId} ` +
           `(event attempt=${mapping.attempt}, current=${dispatch.attempt})`
         );
         return;
@@ -133,7 +180,7 @@ export default function register(api: OpenClawPluginApi) {
       // Create Linear API for hook context
       const tokenInfo = resolveLinearToken(pluginConfig);
       if (!tokenInfo.accessToken) {
-        api.logger.error("agent_end: no Linear access token — cannot process dispatch event");
+        api.logger.error(`${hookName}: no Linear access token — cannot process dispatch event`);
         return;
       }
       const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
@@ -149,29 +196,24 @@ export default function register(api: OpenClawPluginApi) {
         configPath: statePath,
       };
 
-      // Extract output from event
-      const output = typeof event?.output === "string"
-        ? event.output
-        : (event?.messages ?? [])
-            .filter((m: any) => m?.role === "assistant")
-            .map((m: any) => typeof m?.content === "string" ? m.content : "")
-            .join("\n") || "";
+      const output = extractCompletionOutput(event);
+      const success = parseCompletionSuccess(event);
 
       if (mapping.phase === "worker") {
-        api.logger.info(`agent_end: worker completed for ${mapping.dispatchId} — triggering audit`);
+        api.logger.info(`${hookName}: worker completed for ${mapping.dispatchId} - triggering audit`);
         await triggerAudit(hookCtx, dispatch, {
-          success: event?.success ?? true,
+          success,
           output,
         }, sessionKey);
       } else if (mapping.phase === "audit") {
-        api.logger.info(`agent_end: audit completed for ${mapping.dispatchId} — processing verdict`);
+        api.logger.info(`${hookName}: audit completed for ${mapping.dispatchId} - processing verdict`);
         await processVerdict(hookCtx, dispatch, {
-          success: event?.success ?? true,
+          success,
           output,
         }, sessionKey);
       }
     } catch (err) {
-      api.logger.error(`agent_end hook error: ${err}`);
+      api.logger.error(`${hookName} hook error: ${err}`);
       // Escalate: mark dispatch as stuck so it's visible
       try {
         const statePath = pluginConfig?.dispatchStatePath as string | undefined;
@@ -199,10 +241,15 @@ export default function register(api: OpenClawPluginApi) {
           }
         }
       } catch (escalateErr) {
-        api.logger.error(`agent_end escalation also failed: ${escalateErr}`);
+        api.logger.error(`${hookName} escalation also failed: ${escalateErr}`);
       }
     }
-  });
+  };
+
+  for (const hookName of COMPLETION_HOOK_NAMES) {
+    onAnyHook(hookName, (event: any, ctx: any) => handleCompletionEvent(event, ctx, hookName));
+  }
+  api.logger.info(`Dispatch completion hooks registered: ${COMPLETION_HOOK_NAMES.join(", ")}`);
 
   // Inject recent dispatch history as context for worker/audit agents
   api.on("before_agent_start", async (event: any, ctx: any) => {

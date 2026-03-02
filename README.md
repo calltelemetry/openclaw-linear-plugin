@@ -1459,9 +1459,11 @@ The `request_work` intent is the only one gated by issue state. When the issue i
 
 ### Hook Lifecycle
 
-The plugin registers four lifecycle hooks via `api.on()` in `index.ts`:
+The plugin registers completion + lifecycle hooks via `api.on()` in `index.ts`.
+For completion events it listens to `agent_end`, `task_completed`, and `task_completion`
+to stay compatible across OpenClaw lifecycle event changes.
 
-**`agent_end`** — Dispatch pipeline state machine. When a sub-agent (worker or auditor) finishes:
+**Completion hooks (`agent_end` / `task_completed` / `task_completion`)** — Dispatch pipeline state machine. When a sub-agent (worker or auditor) finishes:
 - Looks up the session key in dispatch state to find the active dispatch
 - Validates the attempt number matches (rejects stale events from old retries)
 - If the worker finished → triggers the audit phase (`triggerAudit`)
