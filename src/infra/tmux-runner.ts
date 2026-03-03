@@ -33,7 +33,7 @@ export interface RunInTmuxOptions {
   timeoutMs: number;
   watchdogMs: number;
   logPath: string;
-  mapEvent: (event: any) => ActivityContent | null;
+  mapEvent: (event: any) => ActivityContent[];
   linearApi?: LinearAgentApi;
   agentSessionId?: string;
   steeringMode: "stdin-pipe" | "one-shot";
@@ -247,8 +247,8 @@ export async function runInTmux(opts: RunInTmuxOptions): Promise<CliResult> {
         }
 
         // Stream to Linear
-        const activity = mapEvent(event);
-        if (activity) {
+        const activities = mapEvent(event);
+        for (const activity of activities) {
           if (linearApi && agentSessionId) {
             linearApi.emitActivity(agentSessionId, activity).catch((err) => {
               logger.warn(`Failed to emit tmux activity: ${err}`);

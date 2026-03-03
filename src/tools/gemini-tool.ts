@@ -26,14 +26,14 @@ const GEMINI_BIN = "gemini";
  * Gemini event types:
  *   init → message(user) → message(assistant) → tool_use → tool_result → result
  */
-function mapGeminiEventToActivity(event: any): ActivityContent | null {
+function mapGeminiEventToActivity(event: any): ActivityContent[] {
   const type = event?.type;
 
   // Assistant message (delta text)
   if (type === "message" && event.role === "assistant") {
     const text = event.content;
-    if (text) return { type: "thought", body: text.slice(0, 1000) };
-    return null;
+    if (text) return [{ type: "thought", body: text.slice(0, 1000) }];
+    return [];
   }
 
   // Tool use — running a command or tool
@@ -50,7 +50,7 @@ function mapGeminiEventToActivity(event: any): ActivityContent | null {
     } else {
       paramSummary = JSON.stringify(params).slice(0, 500);
     }
-    return { type: "action", action: `Running ${toolName}`, parameter: paramSummary };
+    return [{ type: "action", action: `Running ${toolName}`, parameter: paramSummary }];
   }
 
   // Tool result
@@ -58,11 +58,11 @@ function mapGeminiEventToActivity(event: any): ActivityContent | null {
     const status = event.status ?? "unknown";
     const output = event.output ?? "";
     const truncated = output.length > 1000 ? output.slice(0, 1000) + "..." : output;
-    return {
+    return [{
       type: "action",
       action: `Tool ${status}`,
       parameter: truncated || "(no output)",
-    };
+    }];
   }
 
   // Final result
@@ -74,10 +74,10 @@ function mapGeminiEventToActivity(event: any): ActivityContent | null {
       if (stats.total_tokens) parts.push(`${stats.total_tokens} tokens`);
       if (stats.tool_calls) parts.push(`${stats.tool_calls} tool calls`);
     }
-    return { type: "thought", body: parts.join(" — ") };
+    return [{ type: "thought", body: parts.join(" — ") }];
   }
 
-  return null;
+  return [];
 }
 
 /**
@@ -244,9 +244,9 @@ export async function runGemini(
         }
       }
 
-      // Stream activity to Linear + session progress
-      const activity = mapGeminiEventToActivity(event);
-      if (activity) {
+      // Stream activities to Linear + session progress
+      const activities = mapGeminiEventToActivity(event);
+      for (const activity of activities) {
         if (linearApi && agentSessionId) {
           linearApi.emitActivity(agentSessionId, activity).catch((err) => {
             api.logger.warn(`Failed to emit Gemini activity: ${err}`);

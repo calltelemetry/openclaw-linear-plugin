@@ -23,13 +23,13 @@ const CODEX_BIN = "codex";
 /**
  * Parse a JSONL line from `codex exec --json` and map it to a Linear activity.
  */
-function mapCodexEventToActivity(event: any): ActivityContent | null {
+function mapCodexEventToActivity(event: any): ActivityContent[] {
   const eventType = event?.type;
   const item = event?.item;
 
   if (item?.type === "reasoning") {
     const text = item.text ?? "";
-    return { type: "thought", body: text ? text.slice(0, 500) : "Reasoning..." };
+    return [{ type: "thought", body: text ? text.slice(0, 500) : "Reasoning..." }];
   }
 
   if (
@@ -37,8 +37,8 @@ function mapCodexEventToActivity(event: any): ActivityContent | null {
     (item?.type === "agent_message" || item?.type === "message")
   ) {
     const text = item.text ?? item.content ?? "";
-    if (text) return { type: "thought", body: text.slice(0, 1000) };
-    return null;
+    if (text) return [{ type: "thought", body: text.slice(0, 1000) }];
+    return [];
   }
 
   if (eventType === "item.started" && item?.type === "command_execution") {
@@ -46,7 +46,7 @@ function mapCodexEventToActivity(event: any): ActivityContent | null {
     const cleaned = typeof cmd === "string"
       ? cmd.replace(/^\/usr\/bin\/\w+ -lc ['"]?/, "").replace(/['"]?$/, "")
       : JSON.stringify(cmd);
-    return { type: "action", action: "Running", parameter: cleaned.slice(0, 200) };
+    return [{ type: "action", action: "Running", parameter: cleaned.slice(0, 200) }];
   }
 
   if (eventType === "item.completed" && item?.type === "command_execution") {
@@ -57,19 +57,19 @@ function mapCodexEventToActivity(event: any): ActivityContent | null {
       ? cmd.replace(/^\/usr\/bin\/\w+ -lc ['"]?/, "").replace(/['"]?$/, "")
       : JSON.stringify(cmd);
     const truncated = output.length > 1000 ? output.slice(0, 1000) + "..." : output;
-    return {
+    return [{
       type: "action",
       action: `${cleaned.slice(0, 150)}`,
       parameter: `exit ${exitCode}`,
       result: truncated || undefined,
-    };
+    }];
   }
 
   if (eventType === "item.completed" && item?.type === "file_changes") {
     const files = item.files ?? [];
     const fileList = Array.isArray(files) ? files.join(", ") : String(files);
     const preview = (item.diff ?? item.content ?? "").slice(0, 500) || undefined;
-    return { type: "action", action: "Modified files", parameter: fileList || "unknown files", result: preview };
+    return [{ type: "action", action: "Modified files", parameter: fileList || "unknown files", result: preview }];
   }
 
   if (eventType === "turn.completed") {
@@ -78,12 +78,12 @@ function mapCodexEventToActivity(event: any): ActivityContent | null {
       const input = usage.input_tokens ?? 0;
       const cached = usage.cached_input_tokens ?? 0;
       const output = usage.output_tokens ?? 0;
-      return { type: "thought", body: `Codex turn complete (${input} in / ${cached} cached / ${output} out tokens)` };
+      return [{ type: "thought", body: `Codex turn complete (${input} in / ${cached} cached / ${output} out tokens)` }];
     }
-    return { type: "thought", body: "Codex turn complete" };
+    return [{ type: "thought", body: "Codex turn complete" }];
   }
 
-  return null;
+  return [];
 }
 
 /**
@@ -248,8 +248,8 @@ export async function runCodex(
         collectedCommands.push(`\`${cleanCmd}\` → exit ${exitCode}${truncOutput ? "\n```\n" + truncOutput + "\n```" : ""}`);
       }
 
-      const activity = mapCodexEventToActivity(event);
-      if (activity) {
+      const activities = mapCodexEventToActivity(event);
+      for (const activity of activities) {
         if (linearApi && agentSessionId) {
           linearApi.emitActivity(agentSessionId, activity).catch((err) => {
             api.logger.warn(`Failed to emit Codex activity: ${err}`);

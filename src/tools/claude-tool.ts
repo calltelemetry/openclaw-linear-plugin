@@ -26,17 +26,18 @@ const CLAUDE_BIN = "claude";
  * Claude event types:
  *   system(init) → assistant (text|tool_use) → user (tool_result) → result
  */
-function mapClaudeEventToActivity(event: any): ActivityContent | null {
+function mapClaudeEventToActivity(event: any): ActivityContent[] {
   const type = event?.type;
 
-  // Assistant message — text response or tool use
+  // Assistant message — text response and/or tool use (emit all blocks)
   if (type === "assistant") {
     const content = event.message?.content;
-    if (!Array.isArray(content)) return null;
+    if (!Array.isArray(content)) return [];
 
+    const activities: ActivityContent[] = [];
     for (const block of content) {
       if (block.type === "text" && block.text) {
-        return { type: "thought", body: block.text.slice(0, 1000) };
+        activities.push({ type: "thought", body: block.text.slice(0, 1000) });
       }
       if (block.type === "tool_use") {
         const toolName = block.name ?? "tool";
@@ -54,30 +55,31 @@ function mapClaudeEventToActivity(event: any): ActivityContent | null {
         } else {
           paramSummary = JSON.stringify(input).slice(0, 500);
         }
-        return { type: "action", action: `Running ${toolName}`, parameter: paramSummary };
+        activities.push({ type: "action", action: `Running ${toolName}`, parameter: paramSummary });
       }
     }
-    return null;
+    return activities;
   }
 
   // Tool result
   if (type === "user") {
     const content = event.message?.content;
-    if (!Array.isArray(content)) return null;
+    if (!Array.isArray(content)) return [];
 
+    const activities: ActivityContent[] = [];
     for (const block of content) {
       if (block.type === "tool_result") {
         const output = typeof block.content === "string" ? block.content : "";
         const truncated = output.length > 1000 ? output.slice(0, 1000) + "..." : output;
         const isError = block.is_error === true;
-        return {
+        activities.push({
           type: "action",
           action: isError ? "Tool error" : "Tool result",
           parameter: truncated || "(no output)",
-        };
+        });
       }
     }
-    return null;
+    return activities;
   }
 
   // Final result
@@ -92,10 +94,10 @@ function mapClaudeEventToActivity(event: any): ActivityContent | null {
       const output = usage.output_tokens ?? 0;
       parts.push(`${input} in / ${output} out tokens`);
     }
-    return { type: "thought", body: parts.join(" — ") };
+    return [{ type: "thought", body: parts.join(" — ") }];
   }
 
-  return null;
+  return [];
 }
 
 /**
@@ -299,9 +301,9 @@ export async function runClaude(
         // (it duplicates the last assistant text message)
       }
 
-      // Stream activity to Linear + session progress
-      const activity = mapClaudeEventToActivity(event);
-      if (activity) {
+      // Stream activities to Linear + session progress
+      const activities = mapClaudeEventToActivity(event);
+      for (const activity of activities) {
         if (linearApi && agentSessionId) {
           linearApi.emitActivity(agentSessionId, activity).catch((err) => {
             api.logger.warn(`Failed to emit Claude activity: ${err}`);
