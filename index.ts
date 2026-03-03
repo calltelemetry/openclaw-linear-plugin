@@ -102,6 +102,8 @@ export default function register(api: OpenClawPluginApi) {
   // Register Linear webhook handler on a dedicated route
   api.registerHttpRoute({
     path: "/linear/webhook",
+    auth: "plugin",
+    match: "exact",
     handler: async (req, res) => {
       await handleLinearWebhook(api, req, res);
     },
@@ -110,6 +112,8 @@ export default function register(api: OpenClawPluginApi) {
   // Back-compat route so existing production webhook URLs keep working.
   api.registerHttpRoute({
     path: "/hooks/linear",
+    auth: "plugin",
+    match: "exact",
     handler: async (req, res) => {
       await handleLinearWebhook(api, req, res);
     },
@@ -118,6 +122,8 @@ export default function register(api: OpenClawPluginApi) {
   // Register OAuth callback route
   api.registerHttpRoute({
     path: "/linear/oauth/callback",
+    auth: "plugin",
+    match: "exact",
     handler: async (req, res) => {
       await handleOAuthCallback(api, req, res);
     },
