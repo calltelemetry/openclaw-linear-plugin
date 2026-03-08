@@ -35,7 +35,7 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
-    "openclaw": "^2026.2.13",
+    "openclaw": "^2026.3.7",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },

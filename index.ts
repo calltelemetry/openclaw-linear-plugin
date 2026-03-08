@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi, PluginHookAgentEndEvent, PluginHookAgentContext, PluginHookSubagentEndedEvent, PluginHookSubagentContext, PluginHookSessionStartEvent, PluginHookSessionEndEvent, PluginHookSessionContext, PluginHookAfterCompactionEvent, PluginHookBeforeResetEvent } from "openclaw/plugin-sdk";
 import { registerLinearProvider } from "./src/api/auth.js";
 import { registerCli } from "./src/infra/cli.js";
 import { createLinearTools } from "./src/tools/tools.js";
@@ -20,7 +20,6 @@ import { createDispatchHistoryTool } from "./src/tools/dispatch-history-tool.js"
 import { readDispatchState as readStateForHook, listActiveDispatches as listActiveForHook } from "./src/pipeline/dispatch-state.js";
 import { startTokenRefreshTimer, stopTokenRefreshTimer } from "./src/infra/token-refresh-timer.js";
 
-const COMPLETION_HOOK_NAMES = ["agent_end", "task_completed", "task_completion"] as const;
 const SUCCESS_STATUSES = new Set(["ok", "success", "completed", "complete", "done", "pass", "passed"]);
 const FAILURE_STATUSES = new Set(["error", "failed", "failure", "timeout", "timed_out", "cancelled", "canceled", "aborted", "unknown"]);
 
@@ -66,7 +65,7 @@ function extractCompletionOutput(event: any): string {
 }
 
 export default function register(api: OpenClawPluginApi) {
-  const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+  const pluginConfig = api.pluginConfig;
 
   // Check token availability (config → env → auth profile store)
   const tokenInfo = resolveLinearToken(pluginConfig);
@@ -152,110 +151,196 @@ export default function register(api: OpenClawPluginApi) {
   // Instantiate notifier (Discord, Slack, or both — config-driven)
   const notify: NotifyFn = createNotifierFromConfig(pluginConfig, api.runtime, api);
 
-  // Register completion hooks — safety net for sessions_spawn sub-agents.
-  // In the current implementation, the worker->audit->verdict flow runs inline
-  // via spawnWorker() in pipeline.ts. These hooks catch sessions_spawn agents
-  // (future upgrade path) and serve as a recovery mechanism.
-  const onAnyHook = api.on as unknown as (hookName: string, handler: (event: any, ctx: any) => Promise<void> | void) => void;
+  // ---------------------------------------------------------------------------
+  // Typed dispatch completion handler (shared by agent_end + subagent_ended)
+  // ---------------------------------------------------------------------------
+  const handleDispatchCompletion = async (
+    sessionKey: string,
+    success: boolean,
+    output: string,
+    hookName: string,
+  ) => {
+    const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+    const state = await readDispatchState(statePath);
+    const mapping = lookupSessionMapping(state, sessionKey);
+    if (!mapping) return; // Not a dispatch sub-agent
 
-  const handleCompletionEvent = async (event: any, ctx: any, hookName: string) => {
-    try {
-      const sessionKey = ctx?.sessionKey ?? "";
-      if (!sessionKey) return;
+    const dispatch = getActiveDispatch(state, mapping.dispatchId);
+    if (!dispatch) {
+      api.logger.info(`${hookName}: dispatch ${mapping.dispatchId} no longer active`);
+      return;
+    }
 
-      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
-      const state = await readDispatchState(statePath);
-      const mapping = lookupSessionMapping(state, sessionKey);
-      if (!mapping) return; // Not a dispatch sub-agent
+    // Stale event rejection — only process if attempt matches
+    if (dispatch.attempt !== mapping.attempt) {
+      api.logger.info(
+        `${hookName}: stale event for ${mapping.dispatchId} ` +
+        `(event attempt=${mapping.attempt}, current=${dispatch.attempt})`
+      );
+      return;
+    }
 
-      const dispatch = getActiveDispatch(state, mapping.dispatchId);
-      if (!dispatch) {
-        api.logger.info(`${hookName}: dispatch ${mapping.dispatchId} no longer active`);
-        return;
-      }
+    // Create Linear API for hook context
+    const tokenInfo = resolveLinearToken(pluginConfig);
+    if (!tokenInfo.accessToken) {
+      api.logger.error(`${hookName}: no Linear access token — cannot process dispatch event`);
+      return;
+    }
+    const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+      refreshToken: tokenInfo.refreshToken,
+      expiresAt: tokenInfo.expiresAt,
+    });
 
-      // Stale event rejection — only process if attempt matches
-      if (dispatch.attempt !== mapping.attempt) {
-        api.logger.info(
-          `${hookName}: stale event for ${mapping.dispatchId} ` +
-          `(event attempt=${mapping.attempt}, current=${dispatch.attempt})`
-        );
-        return;
-      }
+    const hookCtx: HookContext = {
+      api,
+      linearApi,
+      notify,
+      pluginConfig,
+      configPath: statePath,
+    };
 
-      // Create Linear API for hook context
-      const tokenInfo = resolveLinearToken(pluginConfig);
-      if (!tokenInfo.accessToken) {
-        api.logger.error(`${hookName}: no Linear access token — cannot process dispatch event`);
-        return;
-      }
-      const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
-        refreshToken: tokenInfo.refreshToken,
-        expiresAt: tokenInfo.expiresAt,
-      });
-
-      const hookCtx: HookContext = {
-        api,
-        linearApi,
-        notify,
-        pluginConfig,
-        configPath: statePath,
-      };
-
-      const output = extractCompletionOutput(event);
-      const success = parseCompletionSuccess(event);
-
-      if (mapping.phase === "worker") {
-        api.logger.info(`${hookName}: worker completed for ${mapping.dispatchId} - triggering audit`);
-        await triggerAudit(hookCtx, dispatch, {
-          success,
-          output,
-        }, sessionKey);
-      } else if (mapping.phase === "audit") {
-        api.logger.info(`${hookName}: audit completed for ${mapping.dispatchId} - processing verdict`);
-        await processVerdict(hookCtx, dispatch, {
-          success,
-          output,
-        }, sessionKey);
-      }
-    } catch (err) {
-      api.logger.error(`${hookName} hook error: ${err}`);
-      // Escalate: mark dispatch as stuck so it's visible
-      try {
-        const statePath = pluginConfig?.dispatchStatePath as string | undefined;
-        const state = await readDispatchState(statePath);
-        const sessionKey = ctx?.sessionKey ?? "";
-        const mapping = sessionKey ? lookupSessionMapping(state, sessionKey) : null;
-        if (mapping) {
-          const dispatch = getActiveDispatch(state, mapping.dispatchId);
-          if (dispatch && dispatch.status !== "done" && dispatch.status !== "stuck" && dispatch.status !== "failed") {
-            const stuckReason = `Hook error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500);
-            await transitionDispatch(
-              mapping.dispatchId,
-              dispatch.status as DispatchStatus,
-              "stuck",
-              { stuckReason },
-              statePath,
-            );
-            // Notify if possible
-            await notify("escalation", {
-              identifier: dispatch.issueIdentifier,
-              title: dispatch.issueTitle ?? "Unknown",
-              status: "stuck",
-              reason: `Dispatch failed in ${mapping.phase} phase: ${stuckReason}`,
-            }).catch(() => {}); // Don't fail on notification failure
-          }
-        }
-      } catch (escalateErr) {
-        api.logger.error(`${hookName} escalation also failed: ${escalateErr}`);
-      }
+    if (mapping.phase === "worker") {
+      api.logger.info(`${hookName}: worker completed for ${mapping.dispatchId} - triggering audit`);
+      await triggerAudit(hookCtx, dispatch, { success, output }, sessionKey);
+    } else if (mapping.phase === "audit") {
+      api.logger.info(`${hookName}: audit completed for ${mapping.dispatchId} - processing verdict`);
+      await processVerdict(hookCtx, dispatch, { success, output }, sessionKey);
     }
   };
 
-  for (const hookName of COMPLETION_HOOK_NAMES) {
-    onAnyHook(hookName, (event: any, ctx: any) => handleCompletionEvent(event, ctx, hookName));
-  }
-  api.logger.info(`Dispatch completion hooks registered: ${COMPLETION_HOOK_NAMES.join(", ")}`);
+  const escalateDispatchError = async (sessionKey: string, err: unknown, hookName: string) => {
+    try {
+      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+      const state = await readDispatchState(statePath);
+      const mapping = sessionKey ? lookupSessionMapping(state, sessionKey) : null;
+      if (mapping) {
+        const dispatch = getActiveDispatch(state, mapping.dispatchId);
+        if (dispatch && dispatch.status !== "done" && dispatch.status !== "stuck" && dispatch.status !== "failed") {
+          const stuckReason = `Hook error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500);
+          await transitionDispatch(
+            mapping.dispatchId,
+            dispatch.status as DispatchStatus,
+            "stuck",
+            { stuckReason },
+            statePath,
+          );
+          await notify("escalation", {
+            identifier: dispatch.issueIdentifier,
+            title: dispatch.issueTitle ?? "Unknown",
+            status: "stuck",
+            reason: `Dispatch failed in ${mapping.phase} phase: ${stuckReason}`,
+          }).catch(() => {});
+        }
+      }
+    } catch (escalateErr) {
+      api.logger.error(`${hookName} escalation also failed: ${escalateErr}`);
+    }
+  };
+
+  // agent_end — fires when an agent run completes (primary dispatch handler)
+  api.on("agent_end", async (event: PluginHookAgentEndEvent, ctx: PluginHookAgentContext) => {
+    const sessionKey = ctx?.sessionKey ?? "";
+    if (!sessionKey) return;
+    try {
+      const output = extractCompletionOutput(event);
+      const success = parseCompletionSuccess(event);
+      await handleDispatchCompletion(sessionKey, success, output, "agent_end");
+    } catch (err) {
+      api.logger.error(`agent_end hook error: ${err}`);
+      await escalateDispatchError(sessionKey, err, "agent_end");
+    }
+  });
+
+  // subagent_ended — fires when a subagent session ends (proper lifecycle hook, new in 3.7)
+  // This catches sessions_spawn sub-agents with structured outcome data.
+  api.on("subagent_ended", async (event: PluginHookSubagentEndedEvent, ctx: PluginHookSubagentContext) => {
+    const sessionKey = event.targetSessionKey ?? ctx?.childSessionKey ?? "";
+    if (!sessionKey) return;
+    try {
+      const success = event.outcome === "ok";
+      const output = event.error ?? event.reason ?? "";
+      await handleDispatchCompletion(sessionKey, success, output, "subagent_ended");
+    } catch (err) {
+      api.logger.error(`subagent_ended hook error: ${err}`);
+      await escalateDispatchError(sessionKey, err, "subagent_ended");
+    }
+  });
+
+  // session_start — track dispatch session lifecycle
+  api.on("session_start", async (event: PluginHookSessionStartEvent, ctx: PluginHookSessionContext) => {
+    const sessionKey = ctx?.sessionKey ?? event?.sessionKey ?? "";
+    if (!sessionKey) return;
+    try {
+      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+      const state = await readDispatchState(statePath);
+      const mapping = lookupSessionMapping(state, sessionKey);
+      if (mapping) {
+        api.logger.info(`session_start: dispatch ${mapping.dispatchId} phase=${mapping.phase} session started`);
+      }
+    } catch {
+      // Never block session start for telemetry
+    }
+  });
+
+  // session_end — log dispatch session duration for observability
+  api.on("session_end", async (event: PluginHookSessionEndEvent, ctx: PluginHookSessionContext) => {
+    const sessionKey = ctx?.sessionKey ?? event?.sessionKey ?? "";
+    if (!sessionKey) return;
+    try {
+      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+      const state = await readDispatchState(statePath);
+      const mapping = lookupSessionMapping(state, sessionKey);
+      if (mapping) {
+        const durationSec = event.durationMs ? Math.round(event.durationMs / 1000) : "?";
+        api.logger.info(
+          `session_end: dispatch ${mapping.dispatchId} phase=${mapping.phase} ` +
+          `messages=${event.messageCount} duration=${durationSec}s`
+        );
+      }
+    } catch {
+      // Never block session end for telemetry
+    }
+  });
+
+  // after_compaction — log when dispatch sessions compact (visibility into context pressure)
+  api.on("after_compaction", async (event: PluginHookAfterCompactionEvent, ctx: PluginHookAgentContext) => {
+    const sessionKey = ctx?.sessionKey ?? "";
+    if (!sessionKey) return;
+    try {
+      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+      const state = await readDispatchState(statePath);
+      const mapping = lookupSessionMapping(state, sessionKey);
+      if (mapping) {
+        api.logger.warn(
+          `after_compaction: dispatch ${mapping.dispatchId} phase=${mapping.phase} ` +
+          `compacted ${event.compactedCount} messages (${event.messageCount} remaining)`
+        );
+      }
+    } catch {
+      // Never block compaction pipeline
+    }
+  });
+
+  // before_reset — clean up dispatch tracking when a session is reset
+  api.on("before_reset", async (event: PluginHookBeforeResetEvent, ctx: PluginHookAgentContext) => {
+    const sessionKey = ctx?.sessionKey ?? "";
+    if (!sessionKey) return;
+    try {
+      const statePath = pluginConfig?.dispatchStatePath as string | undefined;
+      const state = await readDispatchState(statePath);
+      const mapping = lookupSessionMapping(state, sessionKey);
+      if (mapping) {
+        api.logger.warn(
+          `before_reset: dispatch ${mapping.dispatchId} phase=${mapping.phase} session reset ` +
+          `(reason: ${event.reason ?? "unknown"})`
+        );
+      }
+    } catch {
+      // Never block reset
+    }
+  });
+
+  api.logger.info("Dispatch lifecycle hooks registered: agent_end, subagent_ended, session_start, session_end, after_compaction, before_reset");
 
   // Inject recent dispatch history as context for worker/audit agents
   api.on("before_agent_start", async (event: any, ctx: any) => {
@@ -342,11 +427,11 @@ export default function register(api: OpenClawPluginApi) {
   ];
   const MAX_SHORT_RESPONSE = 250;
 
-  api.on("message_sending", (event: { content?: string }) => {
+  api.on("message_sending", (event) => {
     const text = event?.content ?? "";
-    if (!text || text.length > MAX_SHORT_RESPONSE) return {};
+    if (!text || text.length > MAX_SHORT_RESPONSE) return;
     const isNarration = NARRATION_PATTERNS.some((p) => p.test(text));
-    if (!isNarration) return {};
+    if (!isNarration) return;
     api.logger.warn(`Narration guard triggered: "${text.slice(0, 80)}..."`);
     return {
       content:
