@@ -32,13 +32,39 @@ export async function handleOAuthCallback(
     return;
   }
 
-  const clientId = process.env.LINEAR_CLIENT_ID;
-  const clientSecret = process.env.LINEAR_CLIENT_SECRET;
-  const redirectUri = process.env.LINEAR_REDIRECT_URI ?? `${req.headers["x-forwarded-proto"] ?? "https"}://${req.headers.host}/linear/oauth/callback`;
+  // Read OAuth client credentials from plugin config first (the canonical
+  // location), then env vars as a fallback. The gateway's systemd unit does
+  // not set LINEAR_CLIENT_ID / LINEAR_CLIENT_SECRET, so requiring them via
+  // env was a regression that made the HTTP callback unusable.
+  const pluginConfig = (api as any).pluginConfig as Record<string, unknown> | undefined;
+  const clientId =
+    (pluginConfig?.clientId as string | undefined) ??
+    process.env.LINEAR_CLIENT_ID;
+  const clientSecret =
+    (pluginConfig?.clientSecret as string | undefined) ??
+    process.env.LINEAR_CLIENT_SECRET;
+  // The redirect_uri sent in the token-exchange request MUST match the one
+  // used in the authorize step. Resolution order:
+  //   1. explicit plugin config override
+  //   2. explicit env var override
+  //   3. derive from inbound request headers (canonical for OAuth callbacks
+  //      behind a reverse proxy / tunnel — uses x-forwarded-proto + host)
+  //   4. localhost fallback (only when the request has no host header)
+  const gatewayPort = process.env.OPENCLAW_GATEWAY_PORT ?? "18789";
+  const requestHost = req.headers.host;
+  const requestProto = req.headers["x-forwarded-proto"] ?? "https";
+  const redirectUri =
+    (pluginConfig?.redirectUri as string | undefined) ??
+    process.env.LINEAR_REDIRECT_URI ??
+    (requestHost
+      ? `${requestProto}://${requestHost}/linear/oauth/callback`
+      : `http://localhost:${gatewayPort}/linear/oauth/callback`);
 
   if (!clientId || !clientSecret) {
     res.statusCode = 500;
-    res.end("LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set");
+    res.end(
+      "Linear OAuth callback: clientId/clientSecret missing from plugin config and env",
+    );
     return;
   }
 
