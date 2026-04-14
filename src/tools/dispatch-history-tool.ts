@@ -8,7 +8,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk/core";
 import { readDispatchState, listActiveDispatches, type ActiveDispatch, type CompletedDispatch } from "../pipeline/dispatch-state.js";
 import { resolveOrchestratorWorkspace } from "../pipeline/artifacts.js";
 
@@ -61,6 +61,8 @@ export function createDispatchHistoryTool(
         attempts: number;
         summary?: string;
         active: boolean;
+        /** OpenClaw 2026.4 task-flow id (when bridged via taskflow-bridge). */
+        taskFlowId?: string;
       }> = [];
 
       // Search active dispatches
@@ -74,6 +76,7 @@ export function createDispatchHistoryTool(
             status: d.status,
             attempts: d.attempt,
             active: true,
+            taskFlowId: d.taskFlowId,
           });
         }
       }

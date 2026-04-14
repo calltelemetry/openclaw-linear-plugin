@@ -59,6 +59,13 @@ export interface ActiveDispatch {
   stuckReason?: string;         // only set when status === "stuck"
   issueTitle?: string;          // for artifact summaries and memory headings
   worktrees?: Array<{ repoName: string; path: string; branch: string }>;
+
+  // OpenClaw 2026.4 task-flow integration. Populated when the plugin
+  // successfully calls `api.runtime.taskFlow.bindSession(...).createManaged`.
+  // null/undefined when the gateway runtime doesn't expose the taskFlow seam
+  // (older openclaw, or test environments without a real plugin runtime).
+  taskFlowId?: string;
+  taskFlowRevision?: number;
 }
 
 export interface CompletedDispatch {
@@ -392,6 +399,30 @@ export async function updateDispatchStatus(
     const dispatch = data.dispatches.active[issueIdentifier];
     if (dispatch) {
       dispatch.status = status;
+      await writeDispatchState(filePath, data);
+    }
+  } finally {
+    await releaseLock(filePath);
+  }
+}
+
+/**
+ * Persist a new task-flow revision back to the active dispatch record so
+ * subsequent bridge calls see the up-to-date `expectedRevision`. Best-effort:
+ * silently no-ops when the dispatch is no longer active or has no flow id.
+ */
+export async function updateDispatchTaskFlowRevision(
+  issueIdentifier: string,
+  revision: number,
+  configPath?: string,
+): Promise<void> {
+  const filePath = resolveStatePath(configPath);
+  await acquireLock(filePath);
+  try {
+    const data = await readDispatchState(configPath);
+    const dispatch = data.dispatches.active[issueIdentifier];
+    if (dispatch && dispatch.taskFlowId) {
+      dispatch.taskFlowRevision = revision;
       await writeDispatchState(filePath, data);
     }
   } finally {

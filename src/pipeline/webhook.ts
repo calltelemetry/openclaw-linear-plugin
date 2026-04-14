@@ -5,7 +5,8 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { LinearAgentApi, resolveLinearToken } from "../api/linear-api.js";
 import { spawnWorker, buildProjectContext, type HookContext } from "./pipeline.js";
 import { setActiveSession, clearActiveSession, getIssueAffinity, _configureAffinityTtl, _resetAffinityForTesting } from "./active-session.js";
-import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch } from "./dispatch-state.js";
+import { readDispatchState, getActiveDispatch, registerDispatch, updateDispatchStatus, completeDispatch, removeActiveDispatch, type ActiveDispatch } from "./dispatch-state.js";
+import { createManagedFlowForDispatch } from "./taskflow-bridge.js";
 import { createNotifierFromConfig, type NotifyFn } from "../infra/notify.js";
 import { assessTier } from "./tier-assess.js";
 import { createWorktree, createMultiWorktree, prepareWorkspace } from "../infra/codex-worktree.js";
@@ -2160,9 +2161,11 @@ async function handleDispatch(
     api.logger.warn(`@dispatch: .claw/ init failed: ${err}`);
   }
 
-  // 7. Register dispatch in persistent state
+  // 7. Register dispatch in persistent state, then bridge into the
+  // openclaw runtime task-flow registry so the dispatch shows up alongside
+  // any other durable agent work in the gateway's task surface.
   const now = new Date().toISOString();
-  await registerDispatch(identifier, {
+  const initialDispatch: ActiveDispatch = {
     issueId: issue.id,
     issueIdentifier: identifier,
     issueTitle: enrichedIssue.title ?? "(untitled)",
@@ -2176,7 +2179,9 @@ async function handleDispatch(
     attempt: 0,
     project: enrichedIssue?.project?.id,
     worktrees,
-  }, statePath);
+  };
+  const dispatchWithFlow = createManagedFlowForDispatch(api, initialDispatch);
+  await registerDispatch(identifier, dispatchWithFlow, statePath);
 
   // 7b. Linear state transition: set issue to "In Progress" (best-effort)
   if (enrichedIssue?.team?.id) {

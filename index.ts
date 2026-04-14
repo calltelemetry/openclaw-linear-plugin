@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { OpenClawPluginApi, PluginHookAgentEndEvent, PluginHookAgentContext, PluginHookSubagentEndedEvent, PluginHookSubagentContext, PluginHookSessionStartEvent, PluginHookSessionEndEvent, PluginHookSessionContext, PluginHookAfterCompactionEvent, PluginHookBeforeResetEvent } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { registerLinearProvider } from "./src/api/auth.js";
 import { registerCli } from "./src/infra/cli.js";
 import { createLinearTools } from "./src/tools/tools.js";
@@ -12,6 +12,7 @@ import { createDispatchService } from "./src/pipeline/dispatch-service.js";
 import { registerDispatchMethods } from "./src/gateway/dispatch-methods.js";
 import { readDispatchState, lookupSessionMapping, getActiveDispatch, transitionDispatch, type DispatchStatus } from "./src/pipeline/dispatch-state.js";
 import { triggerAudit, processVerdict, type HookContext } from "./src/pipeline/pipeline.js";
+import { markFlowTerminal } from "./src/pipeline/taskflow-bridge.js";
 import { createNotifierFromConfig, type NotifyFn } from "./src/infra/notify.js";
 import { readPlanningState, setPlanningCache } from "./src/pipeline/planning-state.js";
 import { createPlannerTools } from "./src/tools/planner-tools.js";
@@ -224,6 +225,9 @@ export default function register(api: OpenClawPluginApi) {
             { stuckReason },
             statePath,
           );
+          // Mirror the hook-error escalation into the openclaw task-flow
+          // registry so the managed flow doesn't sit in "running" forever.
+          markFlowTerminal(api, dispatch, "failed", stuckReason);
           await notify("escalation", {
             identifier: dispatch.issueIdentifier,
             title: dispatch.issueTitle ?? "Unknown",
@@ -238,7 +242,7 @@ export default function register(api: OpenClawPluginApi) {
   };
 
   // agent_end — fires when an agent run completes (primary dispatch handler)
-  api.on("agent_end", async (event: PluginHookAgentEndEvent, ctx: PluginHookAgentContext) => {
+  api.on("agent_end", async (event, ctx) => {
     const sessionKey = ctx?.sessionKey ?? "";
     if (!sessionKey) return;
     try {
@@ -253,7 +257,7 @@ export default function register(api: OpenClawPluginApi) {
 
   // subagent_ended — fires when a subagent session ends (proper lifecycle hook, new in 3.7)
   // This catches sessions_spawn sub-agents with structured outcome data.
-  api.on("subagent_ended", async (event: PluginHookSubagentEndedEvent, ctx: PluginHookSubagentContext) => {
+  api.on("subagent_ended", async (event, ctx) => {
     const sessionKey = event.targetSessionKey ?? ctx?.childSessionKey ?? "";
     if (!sessionKey) return;
     try {
@@ -267,7 +271,7 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // session_start — track dispatch session lifecycle
-  api.on("session_start", async (event: PluginHookSessionStartEvent, ctx: PluginHookSessionContext) => {
+  api.on("session_start", async (event, ctx) => {
     const sessionKey = ctx?.sessionKey ?? event?.sessionKey ?? "";
     if (!sessionKey) return;
     try {
@@ -283,7 +287,7 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // session_end — log dispatch session duration for observability
-  api.on("session_end", async (event: PluginHookSessionEndEvent, ctx: PluginHookSessionContext) => {
+  api.on("session_end", async (event, ctx) => {
     const sessionKey = ctx?.sessionKey ?? event?.sessionKey ?? "";
     if (!sessionKey) return;
     try {
@@ -303,7 +307,7 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // after_compaction — log when dispatch sessions compact (visibility into context pressure)
-  api.on("after_compaction", async (event: PluginHookAfterCompactionEvent, ctx: PluginHookAgentContext) => {
+  api.on("after_compaction", async (event, ctx) => {
     const sessionKey = ctx?.sessionKey ?? "";
     if (!sessionKey) return;
     try {
@@ -322,7 +326,7 @@ export default function register(api: OpenClawPluginApi) {
   });
 
   // before_reset — clean up dispatch tracking when a session is reset
-  api.on("before_reset", async (event: PluginHookBeforeResetEvent, ctx: PluginHookAgentContext) => {
+  api.on("before_reset", async (event, ctx) => {
     const sessionKey = ctx?.sessionKey ?? "";
     if (!sessionKey) return;
     try {

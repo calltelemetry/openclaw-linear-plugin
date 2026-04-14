@@ -33,8 +33,15 @@ import {
   TransitionError,
   readDispatchState,
   getActiveDispatch,
+  updateDispatchTaskFlowRevision,
 } from "./dispatch-state.js";
 import { type NotifyFn } from "../infra/notify.js";
+import {
+  recordPhaseTask,
+  markFlowTerminal,
+  markFlowWaiting,
+  markFlowResumed,
+} from "./taskflow-bridge.js";
 import { onProjectIssueCompleted, onProjectIssueStuck } from "./dag-dispatch.js";
 import {
   saveWorkerOutput,
@@ -444,6 +451,16 @@ export async function triggerAudit(
   api.logger.info(`${TAG} worker completed, triggering audit (attempt ${dispatch.attempt})`);
   emitDiagnostic(api, { event: "phase_transition", identifier: dispatch.issueIdentifier, from: "working", to: "auditing", attempt: dispatch.attempt });
 
+  // Mirror the worker→audit transition into the openclaw task-flow registry.
+  // setWaiting parks the managed flow on "audit" so any task-aware UI can
+  // see that the dispatch is between phases. Persist the bumped revision so
+  // subsequent calls (recordPhaseTask + markFlowTerminal) read the right
+  // expectedRevision from disk.
+  const dispatchAfterWait = markFlowWaiting(api, dispatch, "audit");
+  if (dispatchAfterWait.taskFlowRevision !== dispatch.taskFlowRevision && dispatchAfterWait.taskFlowRevision != null) {
+    await updateDispatchTaskFlowRevision(dispatch.issueIdentifier, dispatchAfterWait.taskFlowRevision, configPath);
+  }
+
   // Update .claw/ manifest
   try { updateManifest(dispatch.worktreePath, { status: "auditing", attempts: dispatch.attempt }); } catch {}
 
@@ -520,6 +537,9 @@ export async function triggerAudit(
   }
 
   api.logger.info(`${TAG} spawning audit agent session=${auditSessionId}`);
+
+  // Mirror the audit phase into the openclaw task-flow registry. Best-effort.
+  recordPhaseTask(api, dispatch, "audit", auditAgentId, auditSessionId);
 
   const result = await runAgent({
     api,
@@ -705,6 +725,10 @@ async function handleAuditPass(
     api.logger.warn(`${TAG} PR creation failed (non-fatal): ${err}`);
   }
 
+  // Mirror terminal state into the openclaw task-flow registry first so the
+  // managed flow finishes BEFORE we lose the active dispatch record.
+  markFlowTerminal(api, dispatch, "done");
+
   // Move to completed (include prUrl if PR was created)
   await completeDispatch(dispatch.issueIdentifier, {
     tier: dispatch.tier,
@@ -820,6 +844,8 @@ async function handleAuditFail(
     ).catch((err) => api.logger.error(`${TAG} failed to post escalation comment: ${err}`));
 
     api.logger.warn(`${TAG} audit FAILED ${nextAttempt}x — escalating to human`);
+    // Mirror terminal-failed into the openclaw task-flow registry.
+    markFlowTerminal(api, dispatch, "failed", `audit failed ${nextAttempt}x`);
     emitDiagnostic(api, {
       event: "verdict_processed",
       identifier: dispatch.issueIdentifier,
@@ -863,6 +889,15 @@ async function handleAuditFail(
       return;
     }
     throw err;
+  }
+
+  // Mirror the rework transition into the openclaw task-flow registry —
+  // resume the managed flow back into the running state with currentStep
+  // reflecting the rework attempt counter. Persist the bumped revision so
+  // the next markFlowTerminal call sees the right expectedRevision.
+  const dispatchAfterResume = markFlowResumed(api, dispatch, `worker (rework attempt ${nextAttempt + 1})`);
+  if (dispatchAfterResume.taskFlowRevision !== dispatch.taskFlowRevision && dispatchAfterResume.taskFlowRevision != null) {
+    await updateDispatchTaskFlowRevision(dispatch.issueIdentifier, dispatchAfterResume.taskFlowRevision, configPath);
   }
 
   const gapsList = verdict.gaps.map((g) => `- ${g}`).join("\n");
@@ -993,6 +1028,11 @@ export async function spawnWorker(
     }
   }
 
+  // Mirror this phase into the openclaw task-flow registry. Best-effort —
+  // safe to call without checking for taskFlowId because the bridge no-ops
+  // when the runtime surface or flow state is missing.
+  recordPhaseTask(api, dispatch, "worker", workerAgentId, workerSessionId);
+
   const workerStartTime = Date.now();
   const result = await runAgent({
     api,
@@ -1056,6 +1096,9 @@ export async function spawnWorker(
         api.logger.warn(`${TAG} CAS failed for watchdog stuck transition: ${err.message}`);
       }
     }
+
+    // Mirror watchdog-kill terminal into the openclaw task-flow registry.
+    markFlowTerminal(api, dispatch, "failed", `watchdog killed (no I/O for ${thresholdSec}s)`);
 
     // Linear state transition: move to "Triage" so it shows up for human review
     const wdIssueDetails = await linearApi.getIssueDetails(dispatch.issueId).catch(() => null);
