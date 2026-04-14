@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock openclaw/plugin-sdk
-vi.mock("openclaw/plugin-sdk", () => ({
-  jsonResult: (data: any) => ({ type: "json", data }),
+vi.mock("openclaw/plugin-sdk/core", () => ({
+  jsonResult: (data: any) => ({ type: "json", data, content: [{ type: "text", text: JSON.stringify(data) }], details: data }),
 }));
 
 // Mock LinearAgentApi
@@ -421,7 +421,7 @@ describe("createPlannerTools", () => {
       }),
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       type: "json",
       data: {
         id: "new-id",
@@ -454,7 +454,7 @@ describe("createPlannerTools", () => {
       type: "blocks",
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       type: "json",
       data: {
         id: "rel-id",
@@ -492,7 +492,7 @@ describe("createPlannerTools", () => {
     const result = await tool.execute("call-4", {});
 
     expect(mockLinearApi.getProjectIssues).toHaveBeenCalledWith(PROJECT_ID);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       type: "json",
       data: {
         issueCount: 1,
@@ -523,7 +523,7 @@ describe("createPlannerTools", () => {
     const result = await tool.execute("call-5", {});
 
     expect(mockLinearApi.getProjectIssues).toHaveBeenCalledWith(PROJECT_ID);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       type: "json",
       data: {
         pass: true,
@@ -606,7 +606,7 @@ describe("createPlannerTools", () => {
 
     expect(mockLinearApi.getTeamLabels).toHaveBeenCalledWith(TEAM_ID);
     expect(mockLinearApi.updateIssueExtended).not.toHaveBeenCalled();
-    expect(result.data.isEpic).toBe(true);
+    expect(result.details.isEpic).toBe(true);
   });
 
   it("plan_create_issue: isEpic=true handles error when labeling fails", async () => {
@@ -621,7 +621,7 @@ describe("createPlannerTools", () => {
     });
 
     // Should not throw — best-effort labeling
-    expect(result.data.isEpic).toBe(true);
+    expect(result.details.isEpic).toBe(true);
   });
 
   it("plan_create_issue: estimate=0 is passed (falsy but valid)", async () => {
@@ -663,7 +663,7 @@ describe("createPlannerTools", () => {
       priority: 1,
       labelIds: ["label-1", "label-2"],
     });
-    expect(result.data.updated).toBe(true);
+    expect(result.details.updated).toBe(true);
   });
 
   it("plan_update_issue: only sends provided fields", async () => {

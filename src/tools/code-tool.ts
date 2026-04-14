@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AnyAgentTool, OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
+import { jsonResult } from "openclaw/plugin-sdk/core";
 import { getCurrentSession, getActiveSessionByAgentId } from "../pipeline/active-session.js";
 import { runCodex } from "./codex-tool.js";
 import { runClaude } from "./claude-tool.js";
@@ -132,22 +134,23 @@ function createChannelSender(
   if (!target) return null;
   const { provider, peerId } = target;
 
-  if (provider === "discord") {
+  // 2026.4 dropped runtime.channel.<discord|telegram>.sendMessage* in favor of
+  // a capability-grouped channel runtime. Fall back to the gateway CLI for
+  // out-of-band progress messages — this path is low-frequency (one call per
+  // CLI tool run) so the subprocess cost is acceptable.
+  if (provider === "discord" || provider === "telegram") {
     return async (text: string) => {
-      try {
-        await api.runtime.channel.discord.sendMessageDiscord(peerId, text, { silent: true });
-      } catch (err) {
-        api.logger.warn(`cli channel send (discord) failed: ${err}`);
-      }
-    };
-  }
-  if (provider === "telegram") {
-    return async (text: string) => {
-      try {
-        await api.runtime.channel.telegram.sendMessageTelegram(peerId, text, { silent: true });
-      } catch (err) {
-        api.logger.warn(`cli channel send (telegram) failed: ${err}`);
-      }
+      await new Promise<void>((resolve) => {
+        execFile(
+          "openclaw",
+          ["message", "send", "--channel", provider, "--target", peerId, "--message", text, "--json"],
+          { timeout: 30_000 },
+          (err) => {
+            if (err) api.logger.warn(`cli channel send (${provider}) failed: ${err.message}`);
+            resolve();
+          },
+        );
+      });
     };
   }
   return null;

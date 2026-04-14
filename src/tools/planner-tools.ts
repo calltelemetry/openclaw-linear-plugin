@@ -9,7 +9,7 @@
  * at execution time (same pattern as active-session.ts).
  */
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk/core";
 import type { LinearAgentApi } from "../api/linear-api.js";
 
 // ---------------------------------------------------------------------------

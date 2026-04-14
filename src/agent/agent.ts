@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
@@ -32,21 +31,6 @@ function resolveAgentDirs(agentId: string, config: Record<string, any>): AgentDi
   mkdirSync(agentDir, { recursive: true });
 
   return { workspaceDir, agentDir };
-}
-
-// Import extensionAPI for embedded agent runner (internal, not in public SDK)
-let _extensionAPI: any | null = null;
-async function getExtensionAPI() {
-  if (!_extensionAPI) {
-    // Resolve the openclaw package location dynamically, then import extensionAPI.
-    // openclaw's package.json exports don't expose ./package.json, so resolve
-    // via the main entry point and walk up to the package root.
-    const _require = createRequire(import.meta.url);
-    const mainEntry = _require.resolve("openclaw");
-    const openclawDir = dirname(dirname(mainEntry));
-    _extensionAPI = await import(join(openclawDir, "dist", "extensionAPI.js"));
-  }
-  return _extensionAPI;
 }
 
 export interface AgentRunResult {
@@ -216,8 +200,6 @@ async function runEmbedded(
   readOnly?: boolean,
   toolsDeny?: string[],
 ): Promise<AgentRunResult> {
-  const ext = await getExtensionAPI();
-
   // Load config so we can resolve agent dirs and providers correctly.
   const origConfig = await api.runtime.config.loadConfig();
   let config = origConfig;
@@ -264,11 +246,11 @@ async function runEmbedded(
   const modelRef: string =
     agentEntry?.model?.primary ??
     configAny?.agents?.defaults?.model?.primary ??
-    `${ext.DEFAULT_PROVIDER}/${ext.DEFAULT_MODEL}`;
+    `${api.runtime.agent.defaults.provider}/${api.runtime.agent.defaults.model}`;
 
   // Parse "provider/model-id" format (e.g. "openrouter/moonshotai/kimi-k2.5")
   const slashIdx = modelRef.indexOf("/");
-  const provider = slashIdx > 0 ? modelRef.slice(0, slashIdx) : ext.DEFAULT_PROVIDER;
+  const provider = slashIdx > 0 ? modelRef.slice(0, slashIdx) : api.runtime.agent.defaults.provider;
   const model = slashIdx > 0 ? modelRef.slice(slashIdx + 1) : modelRef;
 
   api.logger.info(`Embedded agent run: agent=${agentId} session=${sessionId} runId=${runId} provider=${provider} model=${model} workspaceDir=${workspaceDir} agentDir=${agentDir}`);
@@ -286,8 +268,10 @@ async function runEmbedded(
     label: `embedded:${agentId}:${sessionId}`,
     logger: api.logger,
     onKill: () => {
+      // The AbortController wired to runEmbeddedPiAgent below is the
+      // canonical way to stop an in-flight embedded run; no extra
+      // host-side abort call is needed.
       controller.abort();
-      try { ext.abortEmbeddedPiRun(sessionId); } catch {}
     },
   });
 
@@ -298,7 +282,7 @@ async function runEmbedded(
 
   watchdog.start();
 
-  const result = await ext.runEmbeddedPiAgent({
+  const result = await api.runtime.agent.runEmbeddedPiAgent({
     sessionId,
     sessionFile,
     workspaceDir,

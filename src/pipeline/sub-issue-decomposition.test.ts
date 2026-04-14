@@ -10,8 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock external dependencies before imports
-vi.mock("openclaw/plugin-sdk", () => ({
-  jsonResult: (data: any) => ({ type: "json", data }),
+vi.mock("openclaw/plugin-sdk/core", () => ({
+  jsonResult: (data: any) => ({ type: "json", data, content: [{ type: "text", text: JSON.stringify(data) }], details: data }),
 }));
 
 vi.mock("../api/linear-api.js", () => ({
@@ -235,7 +235,7 @@ describe("sub-issue decomposition (recorded replay)", () => {
           parentId: RECORDED.createParent.id,
         }),
       );
-      expect(result.data.identifier).toBe(
+      expect(result.details.identifier).toBe(
         RECORDED.createSubIssue1.identifier,
       );
     });
@@ -259,8 +259,8 @@ describe("sub-issue decomposition (recorded replay)", () => {
         relatedIssueId: RECORDED.subIssue2WithRelation.id,
         type: "blocks",
       });
-      expect(result.data.id).toBe(RECORDED.createRelation.id);
-      expect(result.data.type).toBe("blocks");
+      expect(result.details.id).toBe(RECORDED.createRelation.id);
+      expect(result.details.type).toBe("blocks");
     });
 
     it("plan_get_project shows hierarchy with parent-child nesting", async () => {
@@ -301,8 +301,8 @@ describe("sub-issue decomposition (recorded replay)", () => {
       const tool = findTool("plan_audit");
       const result = await tool.execute("call-4", {});
 
-      expect(result.data.pass).toBe(true);
-      expect(result.data.problems).toHaveLength(0);
+      expect(result.details.pass).toBe(true);
+      expect(result.details.problems).toHaveLength(0);
     });
   });
 

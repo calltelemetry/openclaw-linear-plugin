@@ -5,8 +5,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // ---------------------------------------------------------------------------
 
 // Mock openclaw/plugin-sdk
-vi.mock("openclaw/plugin-sdk", () => ({
-  jsonResult: (data: any) => ({ type: "json", data }),
+vi.mock("openclaw/plugin-sdk/core", () => ({
+  jsonResult: (data: any) => ({ type: "json", data, content: [{ type: "text", text: JSON.stringify(data) }], details: data }),
 }));
 
 // Mock dispatch-state
@@ -102,8 +102,8 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-1", {});
 
-    expect(result.data.results).toEqual([]);
-    expect(result.data.message).toContain("No dispatch history found");
+    expect(result.details.results).toEqual([]);
+    expect(result.details.message).toContain("No dispatch history found");
   });
 
   it("finds active dispatch by identifier query", async () => {
@@ -117,9 +117,9 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-2", { query: "CT-100" });
 
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-100");
-    expect(result.data.results[0].active).toBe(true);
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-100");
+    expect(result.details.results[0].active).toBe(true);
   });
 
   it("finds completed dispatch by identifier query", async () => {
@@ -133,9 +133,9 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-3", { query: "CT-200" });
 
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-200");
-    expect(result.data.results[0].active).toBe(false);
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-200");
+    expect(result.details.results[0].active).toBe(false);
   });
 
   it("filters by tier", async () => {
@@ -151,9 +151,9 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-4", { tier: "high" });
 
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-20");
-    expect(result.data.results[0].tier).toBe("high");
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-20");
+    expect(result.details.results[0].tier).toBe("high");
   });
 
   it("filters by status", async () => {
@@ -169,9 +169,9 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-5", { status: "working" });
 
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-10");
-    expect(result.data.results[0].status).toBe("working");
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-10");
+    expect(result.details.results[0].status).toBe("working");
   });
 
   it("combines tier + status filters", async () => {
@@ -189,8 +189,8 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-6", { tier: "high", status: "working" });
 
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-1");
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-1");
   });
 
   it("respects limit parameter", async () => {
@@ -208,7 +208,7 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-7", { limit: 2 });
 
-    expect(result.data.results).toHaveLength(2);
+    expect(result.details.results).toHaveLength(2);
   });
 
   it("matches query substring in memory file content", async () => {
@@ -229,10 +229,10 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-8", { query: "CT-300" });
 
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-300");
-    expect(result.data.results[0].tier).toBe("medium");
-    expect(result.data.results[0].summary).toContain("workaround");
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-300");
+    expect(result.details.results[0].tier).toBe("medium");
+    expect(result.details.results[0].summary).toContain("workaround");
   });
 
   it("returns active flag true for active dispatches", async () => {
@@ -246,7 +246,7 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-9", {});
 
-    expect(result.data.results[0].active).toBe(true);
+    expect(result.details.results[0].active).toBe(true);
   });
 
   it("returns active flag false for completed dispatches", async () => {
@@ -260,7 +260,7 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-10", { query: "CT-60" });
 
-    expect(result.data.results[0].active).toBe(false);
+    expect(result.details.results[0].active).toBe(false);
   });
 
   it("handles memory file read errors gracefully (skips, does not crash)", async () => {
@@ -281,9 +281,9 @@ describe("dispatch_history tool", () => {
     const result = await tool.execute("call-11", {});
 
     // Should still return the active dispatch, just without summary enrichment
-    expect(result.data.results).toHaveLength(1);
-    expect(result.data.results[0].identifier).toBe("CT-70");
-    expect(result.data.results[0].summary).toBeUndefined();
+    expect(result.details.results).toHaveLength(1);
+    expect(result.details.results[0].identifier).toBe("CT-70");
+    expect(result.details.results[0].summary).toBeUndefined();
   });
 
   it("returns structured result with identifier, tier, status, attempt fields", async () => {
@@ -302,7 +302,7 @@ describe("dispatch_history tool", () => {
     const tool = createTool();
     const result = await tool.execute("call-12", {});
 
-    const entry = result.data.results[0];
+    const entry = result.details.results[0];
     expect(entry).toEqual(
       expect.objectContaining({
         identifier: "CT-80",

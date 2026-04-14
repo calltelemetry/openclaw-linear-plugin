@@ -1,15 +1,36 @@
 /**
  * notify.ts — Unified notification provider for dispatch lifecycle events.
  *
- * Uses OpenClaw's native runtime channel API for all providers (Discord, Slack,
- * Telegram, Signal, etc). One formatter, one send function, config-driven
- * fan-out with per-event-type toggles.
+ * Routes through OpenClaw's outbound delivery for all providers (Discord,
+ * Slack, Telegram, Signal, etc). Two delivery paths:
  *
- * Modeled on DevClaw's notify.ts pattern — the runtime handles token resolution,
- * formatting differences (markdown vs mrkdwn), and delivery per channel.
+ *   1. **In-process** — calls `deliverOutboundPayloads` from the gateway's
+ *      bundled outbound runtime. Fast (no subprocess), supports Telegram
+ *      HTML and Discord channelData embeds. Resolved lazily at first call by
+ *      scanning `openclaw/dist/deliver-*.js` for the matching export, since
+ *      the bundle file name carries a build-time hash and is not in
+ *      package.json `exports`.
+ *
+ *   2. **CLI subprocess fallback** — `openclaw message send …` via async
+ *      `execFile`. Used when the in-process resolver can't find a matching
+ *      `deliver-*.js` (e.g. an openclaw upgrade renamed bundles in a way the
+ *      regex doesn't catch) or when the in-process call throws.
+ *
+ * 2026.4 dropped the per-channel `runtime.channel.<id>.sendMessage*` surface
+ * and the public `plugin-sdk` does not re-export `deliverOutboundPayloads`,
+ * so the only stable entrypoint is the CLI fallback. The in-process path is
+ * a best-effort optimization that gracefully degrades.
  */
+import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import type { PluginRuntime, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emitDiagnostic } from "./observability.js";
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -175,7 +196,104 @@ function escapeHtml(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Unified send — routes to OpenClaw runtime channel API
+// In-process delivery resolver
+// ---------------------------------------------------------------------------
+//
+// The 2026.4 plugin SDK does not expose `deliverOutboundPayloads` through
+// any package.json subpath. The function lives in a bundled chunk like
+// `openclaw/dist/deliver-BrOy8-7N.js` whose hash changes per release. We
+// resolve it once at first send by scanning `openclaw/dist/` for any file
+// matching `^deliver-[A-Za-z0-9_-]+\.js$` whose ESM exports include
+// `deliverOutboundPayloads`. The result is cached for the process lifetime.
+// On any failure (fresh install, hash regex miss, breaking signature change)
+// we silently fall through to the CLI subprocess path so notify never
+// blocks dispatch lifecycle on internal API drift.
+
+interface DeliverModule {
+  deliverOutboundPayloads: (params: {
+    cfg: unknown;
+    channel: string;
+    to: string;
+    accountId?: string;
+    payloads: Array<{ text?: string; channelData?: Record<string, unknown> }>;
+    silent?: boolean;
+  }) => Promise<unknown>;
+}
+
+let _deliverModulePromise: Promise<DeliverModule | null> | null = null;
+
+/**
+ * Test seam: reset the cached resolver so unit tests get a fresh probe.
+ * Pass an explicit resolved value to skip the readdir scan entirely (used
+ * by tests that want to force one path or the other).
+ */
+export function _resetDeliverResolver(forceResult?: DeliverModule | null): void {
+  if (forceResult === undefined) {
+    _deliverModulePromise = null;
+  } else {
+    _deliverModulePromise = Promise.resolve(forceResult);
+  }
+}
+
+async function resolveInProcessDeliver(): Promise<DeliverModule | null> {
+  if (_deliverModulePromise) return _deliverModulePromise;
+  _deliverModulePromise = (async () => {
+    try {
+      const _require = createRequire(import.meta.url);
+      const mainEntry = _require.resolve("openclaw");
+      const distDir = dirname(mainEntry);
+      const files = await readdir(distDir);
+      const candidates = files.filter((f) => /^deliver-[A-Za-z0-9_-]+\.js$/.test(f));
+      for (const file of candidates) {
+        try {
+          const url = pathToFileURL(join(distDir, file)).href;
+          const mod = (await import(url)) as Partial<DeliverModule>;
+          if (typeof mod.deliverOutboundPayloads === "function") {
+            return mod as DeliverModule;
+          }
+        } catch {
+          // try next candidate
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  })();
+  return _deliverModulePromise;
+}
+
+/** Build a ReplyPayload from a notify message + target. */
+function buildPayload(
+  target: NotifyTarget,
+  message: string | RichMessage,
+): { text?: string; channelData?: Record<string, unknown> } {
+  if (typeof message === "string") {
+    return { text: message };
+  }
+  // Rich message — encode per-channel envelopes into channelData. The
+  // outbound adapters consume these:
+  //   • Telegram: `sendTelegramPayloadMessages` reads `channelData.telegram`
+  //     for buttons/quoteText; the adapter hardcodes `textMode: "html"` so
+  //     passing HTML in `text` is rendered with `parse_mode: "HTML"`.
+  //   • Discord: `deliverDiscordInteractionReply` reads
+  //     `channelData.discord.components` for components-V2 envelopes.
+  if (target.channel === "telegram" && message.telegram?.html) {
+    return { text: message.telegram.html };
+  }
+  if (target.channel === "discord" && message.discord?.embeds) {
+    return {
+      text: message.text,
+      channelData: {
+        discord: { embeds: message.discord.embeds },
+      },
+    };
+  }
+  return { text: message.text };
+}
+
+// ---------------------------------------------------------------------------
+// Unified send
 // ---------------------------------------------------------------------------
 
 export async function sendToTarget(
@@ -184,36 +302,45 @@ export async function sendToTarget(
   runtime: PluginRuntime,
 ): Promise<void> {
   const ch = target.channel;
-  const to = target.target;
+  const isSilent = ch === "telegram" || ch === "discord";
+
+  // Try in-process delivery first. Falls through to subprocess on any error.
+  const mod = await resolveInProcessDeliver();
+  if (mod) {
+    try {
+      const cfg = await runtime.config.loadConfig();
+      await mod.deliverOutboundPayloads({
+        cfg,
+        channel: ch,
+        to: target.target,
+        accountId: target.accountId,
+        payloads: [buildPayload(target, message)],
+        silent: isSilent,
+      });
+      return;
+    } catch {
+      // Fall through to subprocess on any in-process failure (signature
+      // change, missing channel adapter, etc.). Errors during the actual
+      // send will surface through the subprocess path and the caller's
+      // sanitizer.
+    }
+  }
+
+  // CLI subprocess fallback
   const isRich = typeof message !== "string";
   const plainText = isRich ? message.text : message;
-
-  if (ch === "discord") {
-    if (isRich && message.discord) {
-      await runtime.channel.discord.sendMessageDiscord(to, plainText, { embeds: message.discord.embeds });
-    } else {
-      await runtime.channel.discord.sendMessageDiscord(to, plainText);
-    }
-  } else if (ch === "slack") {
-    await runtime.channel.slack.sendMessageSlack(to, plainText, {
-      accountId: target.accountId,
-    });
-  } else if (ch === "telegram") {
-    if (isRich && message.telegram) {
-      await runtime.channel.telegram.sendMessageTelegram(to, message.telegram.html, { silent: true, textMode: "html" });
-    } else {
-      await runtime.channel.telegram.sendMessageTelegram(to, plainText, { silent: true });
-    }
-  } else if (ch === "signal") {
-    await runtime.channel.signal.sendMessageSignal(to, plainText);
-  } else {
-    // Fallback: use CLI for any channel the runtime doesn't expose directly
-    const { execFileSync } = await import("node:child_process");
-    execFileSync("openclaw", ["message", "send", "--channel", ch, "--target", to, "--message", plainText, "--json"], {
-      timeout: 30_000,
-      stdio: "ignore",
-    });
+  const argv = ["message", "send", "--channel", ch, "--target", target.target, "--message", plainText, "--json"];
+  if (target.accountId) argv.push("--account", target.accountId);
+  if (isSilent) argv.push("--silent");
+  if (isRich && ch === "discord" && message.discord?.embeds) {
+    // Discord components-V2 envelope is the only public CLI route for
+    // embeds; the adapter consumes `params.components` via the action runner.
+    argv.push("--components", JSON.stringify({ embeds: message.discord.embeds }));
   }
+  // CLI cannot pass telegram parse_mode — RichMessage.telegram.html
+  // collapses to plain text on this path. The in-process branch above is
+  // the only way to render Telegram HTML today.
+  await execFileAsync("openclaw", argv, { timeout: 30_000 });
 }
 
 // ---------------------------------------------------------------------------

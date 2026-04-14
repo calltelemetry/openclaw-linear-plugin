@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk/core";
 import { getActiveTmuxSession } from "../infra/tmux-runner.js";
 import { capturePane, shellEscape } from "../infra/tmux.js";
 
@@ -36,7 +36,7 @@ export function createSteeringTools(
         },
         required: ["issueId", "message"],
       },
-      async execute(params: { issueId: string; message: string }) {
+      async execute(_toolCallId: string, params: { issueId: string; message: string }) {
         const session = getActiveTmuxSession(params.issueId);
         if (!session) {
           return jsonResult({ error: `No active tmux session for issue ${params.issueId}` });
@@ -83,7 +83,7 @@ export function createSteeringTools(
         },
         required: ["issueId"],
       },
-      async execute(params: { issueId: string; lines?: number }) {
+      async execute(_toolCallId: string, params: { issueId: string; lines?: number }) {
         const session = getActiveTmuxSession(params.issueId);
         if (!session) {
           return jsonResult({ error: `No active tmux session for issue ${params.issueId}` });
@@ -116,7 +116,7 @@ export function createSteeringTools(
         },
         required: ["issueId"],
       },
-      async execute(params: { issueId: string }) {
+      async execute(_toolCallId: string, params: { issueId: string }) {
         const session = getActiveTmuxSession(params.issueId);
         if (!session) {
           return jsonResult({ error: `No active tmux session for issue ${params.issueId}` });

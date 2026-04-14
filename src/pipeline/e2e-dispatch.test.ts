@@ -48,6 +48,17 @@ vi.mock("../infra/observability.js", () => ({
 
 vi.mock("openclaw/plugin-sdk", () => ({}));
 
+// 2026.4: notify.ts may shell out via execFile (async). Mock node:child_process
+// so tests don't actually invoke the real openclaw CLI (which would hang
+// waiting on a live gateway). Both `execFile` (callback) and `execFileSync`
+// are stubbed because other modules in the import graph touch the sync form.
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: any) => {
+    cb(null, { stdout: "", stderr: "" });
+  }),
+  execFileSync: vi.fn(),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports (AFTER mocks)
 // ---------------------------------------------------------------------------
@@ -514,17 +525,13 @@ describe("E2E dispatch pipeline", () => {
   // Test 8: Multi-target notify with rich format
   // =========================================================================
   it("multi-target notify: discord + telegram called for lifecycle events", async () => {
-    // For this test, we use real createNotifierFromConfig + mock runtime channels
-    const { createNotifierFromConfig } = await import("../infra/notify.js");
-
-    const mockRuntime = {
-      channel: {
-        discord: { sendMessageDiscord: vi.fn().mockResolvedValue(undefined) },
-        telegram: { sendMessageTelegram: vi.fn().mockResolvedValue(undefined) },
-        slack: { sendMessageSlack: vi.fn().mockResolvedValue(undefined) },
-        signal: { sendMessageSignal: vi.fn().mockResolvedValue(undefined) },
-      },
-    };
+    // We exercise the real createNotifierFromConfig with both delivery paths
+    // stubbed: the in-process resolver returns a spy module, and the CLI
+    // subprocess fallback would route through the mocked execFile if the
+    // in-process path were disabled.
+    const { createNotifierFromConfig, _resetDeliverResolver } = await import("../infra/notify.js");
+    const deliverSpy = vi.fn().mockResolvedValue([{ ok: true }]);
+    _resetDeliverResolver({ deliverOutboundPayloads: deliverSpy });
 
     const pluginConfig = {
       notifications: {
@@ -536,7 +543,8 @@ describe("E2E dispatch pipeline", () => {
       },
     };
 
-    const notify = createNotifierFromConfig(pluginConfig, mockRuntime as any);
+    const fakeRuntime = { config: { loadConfig: vi.fn(async () => ({})) } } as any;
+    const notify = createNotifierFromConfig(pluginConfig, fakeRuntime);
 
     const configDir = tmpDir();
     const configPath = join(configDir, "state.json");
@@ -563,23 +571,21 @@ describe("E2E dispatch pipeline", () => {
 
     await spawnWorker(hookCtx, dispatch);
 
-    // Both channels should have been called for "working", "auditing", "audit_pass"
-    const discordCalls = mockRuntime.channel.discord.sendMessageDiscord.mock.calls;
-    const telegramCalls = mockRuntime.channel.telegram.sendMessageTelegram.mock.calls;
+    // Each lifecycle event fans out to both targets, so we expect at least
+    // 6 deliverOutboundPayloads invocations (3 events × 2 channels).
+    expect(deliverSpy.mock.calls.length).toBeGreaterThanOrEqual(6);
 
-    // At least 3 events (working, auditing, audit_pass) × both channels
+    const discordCalls = deliverSpy.mock.calls.filter((call) => {
+      const params = call[0] as any;
+      return params.channel === "discord" && params.to === "discord-channel-1";
+    });
+    const telegramCalls = deliverSpy.mock.calls.filter((call) => {
+      const params = call[0] as any;
+      return params.channel === "telegram" && params.to === "telegram-chat-1";
+    });
+
     expect(discordCalls.length).toBeGreaterThanOrEqual(3);
     expect(telegramCalls.length).toBeGreaterThanOrEqual(3);
-
-    // Verify Discord got the right target
-    for (const call of discordCalls) {
-      expect(call[0]).toBe("discord-channel-1");
-    }
-
-    // Verify Telegram got the right target with HTML (rich format)
-    for (const call of telegramCalls) {
-      expect(call[0]).toBe("telegram-chat-1");
-    }
   });
 
   // =========================================================================

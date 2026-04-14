@@ -15,8 +15,8 @@ vi.mock("../agent/agent.js", () => ({
 // Mock jsonResult (from openclaw/plugin-sdk)
 // ---------------------------------------------------------------------------
 
-vi.mock("openclaw/plugin-sdk", () => ({
-  jsonResult: (obj: unknown) => ({ type: "json", data: obj }),
+vi.mock("openclaw/plugin-sdk/core", () => ({
+  jsonResult: (obj: unknown) => ({ type: "json", data: obj, content: [{ type: "text", text: JSON.stringify(obj) }], details: obj }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -83,9 +83,9 @@ describe("createOrchestrationTools", () => {
     });
 
     // Should return immediately with a sessionId, even though runAgent hasn't resolved
-    expect(result.data.agentId).toBe("kaylee");
-    expect(result.data.sessionId).toMatch(/^spawn-kaylee-/);
-    expect(result.data.message).toContain("Dispatched task");
+    expect(result.details.agentId).toBe("kaylee");
+    expect(result.details.sessionId).toMatch(/^spawn-kaylee-/);
+    expect(result.details.message).toContain("Dispatched task");
     expect(mockRunAgent).toHaveBeenCalledOnce();
 
     // Clean up: resolve the hanging promise to avoid unhandled rejection
@@ -107,11 +107,11 @@ describe("createOrchestrationTools", () => {
       message: "Would this schema change break existing tests?",
     });
 
-    expect(result.data.agentId).toBe("kaylee");
-    expect(result.data.response).toBe(
+    expect(result.details.agentId).toBe("kaylee");
+    expect(result.details.response).toBe(
       "No, the schema change is backward-compatible and won't break tests.",
     );
-    expect(result.data.message).toContain("Response from agent");
+    expect(result.details.message).toContain("Response from agent");
   });
 
   it("ask_agent returns error message on failure", async () => {
@@ -129,10 +129,10 @@ describe("createOrchestrationTools", () => {
       message: "Check if the migration works",
     });
 
-    expect(result.data.agentId).toBe("kaylee");
-    expect(result.data.error).toBe("Agent timed out after 120s");
-    expect(result.data.message).toContain("failed to respond");
-    expect(result.data.response).toBeUndefined();
+    expect(result.details.agentId).toBe("kaylee");
+    expect(result.details.error).toBe("Agent timed out after 120s");
+    expect(result.details.message).toContain("failed to respond");
+    expect(result.details.response).toBeUndefined();
   });
 
   it("ask_agent uses custom timeout when provided", async () => {
