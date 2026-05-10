@@ -304,6 +304,21 @@ describe("namespace fallback", () => {
     expect(next.taskFlowId).toBe("flow-1");
   });
 
+  it("skips invalid managedFlows objects when probing fallback namespaces", () => {
+    const { taskFlow, flow } = makeFlow();
+    const invalidManagedFlows = { bindSession: "not-a-function" };
+    const api = {
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
+      runtime: { tasks: { managedFlows: invalidManagedFlows, flow: taskFlow } },
+    } as any;
+
+    const next = createManagedFlowForDispatch(api, makeDispatch());
+
+    expect(taskFlow.bindSession).toHaveBeenCalled();
+    expect(flow.createManaged).toHaveBeenCalled();
+    expect(next.taskFlowId).toBe("flow-1");
+  });
+
   it("uses runtime.taskFlow for OpenClaw 2026.4 compatibility", () => {
     const { taskFlow, flow } = makeFlow();
     const api = {

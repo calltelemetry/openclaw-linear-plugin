@@ -116,9 +116,12 @@ function resolveTaskFlowApi(api: OpenClawPluginApi): TaskFlowApi | null {
   const runtime = api.runtime as Record<string, unknown> | undefined;
   if (!runtime) return null;
   const tasks = runtime.tasks as { managedFlows?: unknown; flow?: unknown } | undefined;
-  const candidate = (tasks?.managedFlows ?? tasks?.flow ?? runtime.taskFlow) as TaskFlowApi | undefined;
-  if (!candidate || typeof candidate.bindSession !== "function") return null;
-  return candidate;
+  for (const candidate of [tasks?.managedFlows, tasks?.flow, runtime.taskFlow]) {
+    if (candidate && typeof (candidate as TaskFlowApi).bindSession === "function") {
+      return candidate as TaskFlowApi;
+    }
+  }
+  return null;
 }
 
 /**
