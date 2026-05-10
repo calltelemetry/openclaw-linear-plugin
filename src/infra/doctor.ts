@@ -929,6 +929,9 @@ interface BackendSpec {
   unsetEnv?: string[];
 }
 
+/**
+ * Resolve configured coding backends into concrete CLI probes.
+ */
 function resolveBackendSpecs(pluginConfig?: Record<string, unknown>): BackendSpec[] {
   const binDir = join(process.env.HOME ?? homedir(), ".npm-global", "bin");
   return [
@@ -958,6 +961,9 @@ function resolveBackendSpecs(pluginConfig?: Record<string, unknown>): BackendSpe
   ];
 }
 
+/**
+ * Check that a backend binary exists and can report a version.
+ */
 function checkBackendBinary(spec: BackendSpec): { installed: boolean; checks: CheckResult[] } {
   const checks: CheckResult[] = [];
 
@@ -990,6 +996,9 @@ function checkBackendBinary(spec: BackendSpec): { installed: boolean; checks: Ch
   return { installed: true, checks };
 }
 
+/**
+ * Verify that the backend has an API key from plugin config or environment.
+ */
 function checkBackendApiKey(spec: BackendSpec, pluginConfig?: Record<string, unknown>): CheckResult {
   // Check plugin config first
   if (spec.configKey) {
@@ -1013,6 +1022,9 @@ function checkBackendApiKey(spec: BackendSpec, pluginConfig?: Record<string, unk
   );
 }
 
+/**
+ * Execute a bounded live CLI call for a backend that has an installed binary.
+ */
 function checkBackendLive(spec: BackendSpec, pluginConfig?: Record<string, unknown>): CheckResult {
   const env = { ...process.env } as Record<string, string | undefined>;
   for (const key of spec.unsetEnv ?? []) delete env[key];
@@ -1082,15 +1094,18 @@ export async function checkCodeRunDeep(
     const { installed, checks: binChecks } = checkBackendBinary(spec);
     checks.push(...binChecks);
 
-    if (installed) {
-      // 2. API key check
-      checks.push(checkBackendApiKey(spec, pluginConfig));
+    // API key checks do not depend on the CLI binary being present, and keeping
+    // them visible makes doctor output stable across fresh machines.
+    checks.push(checkBackendApiKey(spec, pluginConfig));
 
+    if (installed) {
       // 3. Live invocation test
       const liveResult = checkBackendLive(spec, pluginConfig);
       checks.push(liveResult);
 
       if (liveResult.severity === "pass") callableCount++;
+    } else {
+      checks.push(warn("Live test: skipped (binary missing)"));
     }
 
     sections.push({ name: `Code Run: ${spec.label}`, checks });

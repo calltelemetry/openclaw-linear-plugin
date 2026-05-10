@@ -25,6 +25,8 @@ jobs:
 
       - run: npm install --ignore-scripts
 
+      - run: npm run typecheck
+
       - name: Create minimal openclaw config for tests
         run: |
           mkdir -p ~/.openclaw

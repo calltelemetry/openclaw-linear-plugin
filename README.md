@@ -7,7 +7,7 @@
 [![CI](https://github.com/calltelemetry/openclaw-linear-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/calltelemetry/openclaw-linear-plugin/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/calltelemetry/openclaw-linear-plugin/graph/badge.svg)](https://codecov.io/gh/calltelemetry/openclaw-linear-plugin)
 [![npm](https://img.shields.io/npm/v/@calltelemetry/openclaw-linear)](https://www.npmjs.com/package/@calltelemetry/openclaw-linear)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.2+-blue)](https://github.com/calltelemetry/openclaw)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.5.9--beta.1-blue)](https://github.com/openclaw/openclaw/releases/tag/v2026.5.9-beta.1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Connect Linear to AI agents. Issues get triaged, implemented, and audited — automatically.
@@ -1659,6 +1659,7 @@ This is separate from the main `doctor` because each live test spawns a real CLI
 
 ```bash
 cd ~/claw-extensions/linear
+npm run typecheck              # Validate source against the OpenClaw plugin SDK
 npx vitest run                   # Run all tests
 npx vitest run --reporter=verbose  # See every test name
 npx vitest run src/pipeline/     # Just pipeline tests

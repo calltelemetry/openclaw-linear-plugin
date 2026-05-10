@@ -97,7 +97,8 @@ import { loadCodingConfig } from "../tools/code-tool.js";
 import { getWebhookStatus, provisionWebhook } from "./webhook-provision.js";
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ---------------------------------------------------------------------------
@@ -229,6 +230,8 @@ describe("checkCodingTools", () => {
 
 describe("checkFilesAndDirs", () => {
   it("reports dispatch state counts", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "claw-doctor-state-")), "state.json");
+    writeFileSync(path, "{}");
     vi.mocked(readDispatchState).mockResolvedValueOnce({
       dispatches: {
         active: { "API-1": { status: "working" } as any },
@@ -238,7 +241,7 @@ describe("checkFilesAndDirs", () => {
       processedEvents: [],
     });
 
-    const checks = await checkFilesAndDirs();
+    const checks = await checkFilesAndDirs({ dispatchStatePath: path });
     const stateCheck = checks.find((c) => c.label.includes("Dispatch state"));
     expect(stateCheck?.severity).toBe("pass");
     expect(stateCheck?.label).toContain("1 active");
@@ -1469,8 +1472,6 @@ describe("checkFilesAndDirs — worktree & base repo edge cases", () => {
 
 describe("checkFilesAndDirs — tilde path resolution", () => {
   it("resolves ~/... dispatch state path", async () => {
-    vi.mocked(readDispatchState).mockRejectedValueOnce(new Error("ENOENT"));
-
     // Providing a path with ~/ triggers the tilde resolution branch
     const checks = await checkFilesAndDirs({
       dispatchStatePath: "~/nonexistent-state-file.json",
@@ -1746,4 +1747,3 @@ describe("checkFilesAndDirs — multi-repo validation", () => {
     expect(repoCheck?.label).toContain("not a git repo");
   });
 });
-

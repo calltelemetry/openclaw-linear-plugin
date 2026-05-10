@@ -1,6 +1,6 @@
 {
   "name": "@calltelemetry/openclaw-linear",
-  "version": "0.9.23",
+  "version": "0.9.24",
   "description": "Linear Agent plugin for OpenClaw — webhook-driven AI pipeline with OAuth, multi-agent routing, and issue triage",
   "type": "module",
   "license": "MIT",
@@ -18,6 +18,9 @@
     "ai-pipeline",
     "issue-triage"
   ],
+  "engines": {
+    "node": ">=22.16"
+  },
   "files": [
     "index.ts",
     "src/",
@@ -28,15 +31,17 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
   },
   "publishConfig": {
     "access": "public"
   },
   "devDependencies": {
+    "@types/node": "^22.19.18",
     "@vitest/coverage-v8": "^4.0.18",
     "commander": "^14.0.3",
-    "openclaw": "^2026.4.12",
+    "openclaw": "^2026.5.9-beta.1",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },
@@ -51,6 +56,8 @@
   },
   "overrides": {
     "tar": "^7.5.1",
-    "axios": "^1.13.10"
+    "axios": "^1.13.10",
+    "basic-ftp": "^6.0.1",
+    "postcss": "^8.5.14"
   }
 }

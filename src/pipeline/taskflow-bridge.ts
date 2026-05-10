@@ -43,12 +43,10 @@ const CONTROLLER_PREFIX = "linear-dispatch";
 // Runtime probing
 // ---------------------------------------------------------------------------
 //
-// `api.runtime.taskFlow` and `api.runtime.tasks.flow` are both typed in the
-// 2026.4 plugin SDK — the top-level alias is marked @deprecated in favor of
-// `api.runtime.tasks.flows` (the read-only DTO API) but the *mutating*
-// surface (createManaged, runTask, setWaiting, finish, fail) only exists on
-// PluginRuntimeTaskFlow. Until openclaw exposes a non-deprecated mutation
-// path we use whichever surface actually has the methods at runtime.
+// OpenClaw 2026.5 exposes the managed mutation surface at
+// `api.runtime.tasks.managedFlows`. Older 2026.4 builds exposed the same
+// mutation API as `api.runtime.tasks.flow` and `api.runtime.taskFlow`; both are
+// retained here as compatibility fallbacks.
 
 /**
  * `TaskRuntime` enumerates the runtimes the openclaw task registry knows
@@ -111,17 +109,24 @@ interface TaskFlowApi {
   bindSession(params: { sessionKey: string }): BoundFlow;
 }
 
+/**
+ * Locate the managed task-flow mutation API across OpenClaw SDK versions.
+ */
 function resolveTaskFlowApi(api: OpenClawPluginApi): TaskFlowApi | null {
   const runtime = api.runtime as Record<string, unknown> | undefined;
   if (!runtime) return null;
-  // Prefer `api.runtime.tasks.flow` (post-2026.4 namespace), fall back to
-  // top-level `api.runtime.taskFlow` (deprecated alias still typed in SDK).
-  const tasks = runtime.tasks as { flow?: unknown } | undefined;
-  const candidate = (tasks?.flow ?? runtime.taskFlow) as TaskFlowApi | undefined;
-  if (!candidate || typeof candidate.bindSession !== "function") return null;
-  return candidate;
+  const tasks = runtime.tasks as { managedFlows?: unknown; flow?: unknown } | undefined;
+  for (const candidate of [tasks?.managedFlows, tasks?.flow, runtime.taskFlow]) {
+    if (candidate && typeof (candidate as TaskFlowApi).bindSession === "function") {
+      return candidate as TaskFlowApi;
+    }
+  }
+  return null;
 }
 
+/**
+ * Bind the task-flow API to the session that owns the Linear dispatch.
+ */
 function bindFlow(api: OpenClawPluginApi, sessionKey: string): BoundFlow | null {
   const taskFlow = resolveTaskFlowApi(api);
   if (!taskFlow) return null;
@@ -133,14 +138,23 @@ function bindFlow(api: OpenClawPluginApi, sessionKey: string): BoundFlow | null 
   }
 }
 
+/**
+ * Normalize thrown values for debug logging without leaking stack traces.
+ */
 function formatErr(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Build the stable OpenClaw controller identifier for a Linear issue.
+ */
 function controllerIdFor(dispatch: ActiveDispatch): string {
   return `${CONTROLLER_PREFIX}:${dispatch.issueIdentifier}`;
 }
 
+/**
+ * Build the task-flow goal shown in OpenClaw task views.
+ */
 function goalFor(dispatch: ActiveDispatch): string {
   const title = dispatch.issueTitle ?? "(no title)";
   return `Resolve ${dispatch.issueIdentifier}: ${title}`;
