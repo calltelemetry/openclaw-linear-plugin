@@ -275,16 +275,16 @@ describe("markFlowTerminal", () => {
 
 describe("namespace fallback", () => {
   it("prefers runtime.tasks.managedFlows over deprecated aliases", () => {
-    const { taskFlow: managedFlows, flow } = makeFlow();
+    const { taskFlow: managedFlowsApi, flow } = makeFlow();
     const deprecatedFlow = { bindSession: vi.fn() };
     const api = {
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
-      runtime: { tasks: { managedFlows, flow: deprecatedFlow }, taskFlow: deprecatedFlow },
+      runtime: { tasks: { managedFlows: managedFlowsApi, flow: deprecatedFlow }, taskFlow: deprecatedFlow },
     } as any;
 
     const next = createManagedFlowForDispatch(api, makeDispatch());
 
-    expect(managedFlows.bindSession).toHaveBeenCalled();
+    expect(managedFlowsApi.bindSession).toHaveBeenCalled();
     expect(deprecatedFlow.bindSession).not.toHaveBeenCalled();
     expect(flow.createManaged).toHaveBeenCalled();
     expect(next.taskFlowId).toBe("flow-1");
