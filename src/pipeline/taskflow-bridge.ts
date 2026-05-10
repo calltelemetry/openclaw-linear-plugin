@@ -109,6 +109,9 @@ interface TaskFlowApi {
   bindSession(params: { sessionKey: string }): BoundFlow;
 }
 
+/**
+ * Locate the managed task-flow mutation API across OpenClaw SDK versions.
+ */
 function resolveTaskFlowApi(api: OpenClawPluginApi): TaskFlowApi | null {
   const runtime = api.runtime as Record<string, unknown> | undefined;
   if (!runtime) return null;
@@ -118,6 +121,9 @@ function resolveTaskFlowApi(api: OpenClawPluginApi): TaskFlowApi | null {
   return candidate;
 }
 
+/**
+ * Bind the task-flow API to the session that owns the Linear dispatch.
+ */
 function bindFlow(api: OpenClawPluginApi, sessionKey: string): BoundFlow | null {
   const taskFlow = resolveTaskFlowApi(api);
   if (!taskFlow) return null;
@@ -129,14 +135,23 @@ function bindFlow(api: OpenClawPluginApi, sessionKey: string): BoundFlow | null 
   }
 }
 
+/**
+ * Normalize thrown values for debug logging without leaking stack traces.
+ */
 function formatErr(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Build the stable OpenClaw controller identifier for a Linear issue.
+ */
 function controllerIdFor(dispatch: ActiveDispatch): string {
   return `${CONTROLLER_PREFIX}:${dispatch.issueIdentifier}`;
 }
 
+/**
+ * Build the task-flow goal shown in OpenClaw task views.
+ */
 function goalFor(dispatch: ActiveDispatch): string {
   const title = dispatch.issueTitle ?? "(no title)";
   return `Resolve ${dispatch.issueIdentifier}: ${title}`;
