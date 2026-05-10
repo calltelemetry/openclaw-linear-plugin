@@ -40,7 +40,7 @@ function makeApi(taskFlowImpl?: unknown) {
         error: (msg: string) => logs.push({ level: "error", msg }),
       },
       runtime: taskFlowImpl
-        ? { taskFlow: taskFlowImpl }
+        ? { tasks: { managedFlows: taskFlowImpl } }
         : {},
     } as any,
     logs,
@@ -270,15 +270,45 @@ describe("markFlowTerminal", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Compatibility with `runtime.tasks.flow` namespace
+// Compatibility with OpenClaw task-flow namespaces
 // ---------------------------------------------------------------------------
 
 describe("namespace fallback", () => {
+  it("prefers runtime.tasks.managedFlows over deprecated aliases", () => {
+    const { taskFlow: managedFlows, flow } = makeFlow();
+    const deprecatedFlow = { bindSession: vi.fn() };
+    const api = {
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
+      runtime: { tasks: { managedFlows, flow: deprecatedFlow }, taskFlow: deprecatedFlow },
+    } as any;
+
+    const next = createManagedFlowForDispatch(api, makeDispatch());
+
+    expect(managedFlows.bindSession).toHaveBeenCalled();
+    expect(deprecatedFlow.bindSession).not.toHaveBeenCalled();
+    expect(flow.createManaged).toHaveBeenCalled();
+    expect(next.taskFlowId).toBe("flow-1");
+  });
+
   it("uses runtime.tasks.flow when api.runtime.taskFlow is absent", () => {
     const { taskFlow, flow } = makeFlow();
     const api = {
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
       runtime: { tasks: { flow: taskFlow } }, // no top-level taskFlow
+    } as any;
+
+    const next = createManagedFlowForDispatch(api, makeDispatch());
+
+    expect(taskFlow.bindSession).toHaveBeenCalled();
+    expect(flow.createManaged).toHaveBeenCalled();
+    expect(next.taskFlowId).toBe("flow-1");
+  });
+
+  it("uses runtime.taskFlow for OpenClaw 2026.4 compatibility", () => {
+    const { taskFlow, flow } = makeFlow();
+    const api = {
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
+      runtime: { taskFlow },
     } as any;
 
     const next = createManagedFlowForDispatch(api, makeDispatch());

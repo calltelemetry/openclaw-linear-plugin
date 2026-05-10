@@ -1082,15 +1082,18 @@ export async function checkCodeRunDeep(
     const { installed, checks: binChecks } = checkBackendBinary(spec);
     checks.push(...binChecks);
 
-    if (installed) {
-      // 2. API key check
-      checks.push(checkBackendApiKey(spec, pluginConfig));
+    // API key checks do not depend on the CLI binary being present, and keeping
+    // them visible makes doctor output stable across fresh machines.
+    checks.push(checkBackendApiKey(spec, pluginConfig));
 
+    if (installed) {
       // 3. Live invocation test
       const liveResult = checkBackendLive(spec, pluginConfig);
       checks.push(liveResult);
 
       if (liveResult.severity === "pass") callableCount++;
+    } else {
+      checks.push(warn("Live test: skipped (binary missing)"));
     }
 
     sections.push({ name: `Code Run: ${spec.label}`, checks });

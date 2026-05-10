@@ -43,12 +43,10 @@ const CONTROLLER_PREFIX = "linear-dispatch";
 // Runtime probing
 // ---------------------------------------------------------------------------
 //
-// `api.runtime.taskFlow` and `api.runtime.tasks.flow` are both typed in the
-// 2026.4 plugin SDK — the top-level alias is marked @deprecated in favor of
-// `api.runtime.tasks.flows` (the read-only DTO API) but the *mutating*
-// surface (createManaged, runTask, setWaiting, finish, fail) only exists on
-// PluginRuntimeTaskFlow. Until openclaw exposes a non-deprecated mutation
-// path we use whichever surface actually has the methods at runtime.
+// OpenClaw 2026.5 exposes the managed mutation surface at
+// `api.runtime.tasks.managedFlows`. Older 2026.4 builds exposed the same
+// mutation API as `api.runtime.tasks.flow` and `api.runtime.taskFlow`; both are
+// retained here as compatibility fallbacks.
 
 /**
  * `TaskRuntime` enumerates the runtimes the openclaw task registry knows
@@ -114,10 +112,8 @@ interface TaskFlowApi {
 function resolveTaskFlowApi(api: OpenClawPluginApi): TaskFlowApi | null {
   const runtime = api.runtime as Record<string, unknown> | undefined;
   if (!runtime) return null;
-  // Prefer `api.runtime.tasks.flow` (post-2026.4 namespace), fall back to
-  // top-level `api.runtime.taskFlow` (deprecated alias still typed in SDK).
-  const tasks = runtime.tasks as { flow?: unknown } | undefined;
-  const candidate = (tasks?.flow ?? runtime.taskFlow) as TaskFlowApi | undefined;
+  const tasks = runtime.tasks as { managedFlows?: unknown; flow?: unknown } | undefined;
+  const candidate = (tasks?.managedFlows ?? tasks?.flow ?? runtime.taskFlow) as TaskFlowApi | undefined;
   if (!candidate || typeof candidate.bindSession !== "function") return null;
   return candidate;
 }
