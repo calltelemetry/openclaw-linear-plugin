@@ -130,6 +130,16 @@ The end result: you work in Linear. You create issues, assign them, comment in p
 - **Notifications** — Dispatch lifecycle events (started, auditing, done, stuck) to Discord, Slack, Telegram, or Signal. Rich formatting optional.
 - **Webhook deduplication** — Two-tier guard (in-memory set + 60s TTL map) prevents double-processing across Linear's two webhook systems.
 
+### Optional X/Twitter Intake
+
+Teams that track public launch, support, or release feedback in Linear can pair this plugin with [TweetClaw](https://github.com/Xquik-dev/tweetclaw). TweetClaw is a separate OpenClaw plugin for X/Twitter automation: search tweets, search tweet replies, monitor product or issue URLs, post approved updates or replies, and feed reviewed findings back into Linear issues.
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+```
+
+Use the [ClawHub listing](https://clawhub.ai/plugins/@xquik/tweetclaw) for browsing plugin details. Use the npm package `@xquik/tweetclaw` as the install source.
+
 ---
 
 ## Quick Start
@@ -924,7 +934,7 @@ Define your agents in `~/.openclaw/agent-profiles.json`:
       "mission": "Full-stack engineer. Plans, implements, ships.",
       "isDefault": true,
       "mentionAliases": ["coder"],
-      "avatarUrl": "https://example.com/coder.png",
+      "avatarUrl": "https://github.com/identicons/coder.png",
       "watchdog": {
         "inactivitySec": 180,
         "maxTotalSec": 7200,
