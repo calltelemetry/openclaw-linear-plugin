@@ -23,3 +23,24 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Keep the SHA-pinned action refs current (with changelogs) now that
+    # sha_pinning_required is enforced. One rolling PR for minor/patch.
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    cooldown:
+      semver-minor-days: 3
+      semver-patch-days: 3
+    # Major action bumps stay human-reviewed.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
