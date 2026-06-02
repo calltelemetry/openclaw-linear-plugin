@@ -38,8 +38,7 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     cooldown:
-      semver-minor-days: 3
-      semver-patch-days: 3
+      default-days: 3
     # Major action bumps stay human-reviewed.
     ignore:
       - dependency-name: "*"
