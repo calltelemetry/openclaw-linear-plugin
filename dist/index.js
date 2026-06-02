@@ -1,0 +1,436 @@
+import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { registerLinearProvider } from "./src/api/auth.js";
+import { registerCli } from "./src/infra/cli.js";
+import { createLinearTools } from "./src/tools/tools.js";
+import { handleLinearWebhook } from "./src/pipeline/webhook.js";
+import { handleOAuthCallback } from "./src/api/oauth-callback.js";
+import { LinearAgentApi, resolveLinearToken } from "./src/api/linear-api.js";
+import { createDispatchService } from "./src/pipeline/dispatch-service.js";
+import { registerDispatchMethods } from "./src/gateway/dispatch-methods.js";
+import { readDispatchState, lookupSessionMapping, getActiveDispatch, transitionDispatch } from "./src/pipeline/dispatch-state.js";
+import { triggerAudit, processVerdict } from "./src/pipeline/pipeline.js";
+import { markFlowTerminal } from "./src/pipeline/taskflow-bridge.js";
+import { createNotifierFromConfig } from "./src/infra/notify.js";
+import { readPlanningState, setPlanningCache } from "./src/pipeline/planning-state.js";
+import { createPlannerTools } from "./src/tools/planner-tools.js";
+import { registerDispatchCommands } from "./src/infra/commands.js";
+import { createDispatchHistoryTool } from "./src/tools/dispatch-history-tool.js";
+import { readDispatchState as readStateForHook, listActiveDispatches as listActiveForHook } from "./src/pipeline/dispatch-state.js";
+import { startTokenRefreshTimer, stopTokenRefreshTimer } from "./src/infra/token-refresh-timer.js";
+const SUCCESS_STATUSES = new Set(["ok", "success", "completed", "complete", "done", "pass", "passed"]);
+const FAILURE_STATUSES = new Set(["error", "failed", "failure", "timeout", "timed_out", "cancelled", "canceled", "aborted", "unknown"]);
+function parseCompletionSuccess(event) {
+    if (typeof event?.success === "boolean") {
+        return event.success;
+    }
+    const status = typeof event?.status === "string" ? event.status.trim().toLowerCase() : "";
+    if (status) {
+        if (SUCCESS_STATUSES.has(status))
+            return true;
+        if (FAILURE_STATUSES.has(status))
+            return false;
+    }
+    if (typeof event?.error === "string" && event.error.trim().length > 0) {
+        return false;
+    }
+    return true;
+}
+function extractCompletionOutput(event) {
+    if (typeof event?.output === "string" && event.output.trim().length > 0) {
+        return event.output;
+    }
+    if (typeof event?.result === "string" && event.result.trim().length > 0) {
+        return event.result;
+    }
+    const assistantBlocks = (event?.messages ?? [])
+        .filter((m) => m?.role === "assistant")
+        .flatMap((m) => {
+        if (typeof m?.content === "string") {
+            return [m.content];
+        }
+        if (Array.isArray(m?.content)) {
+            return m.content
+                .filter((b) => b?.type === "text" && typeof b?.text === "string")
+                .map((b) => b.text);
+        }
+        return [];
+    })
+        .filter((value) => value.trim().length > 0);
+    return assistantBlocks.join("\n");
+}
+export default function register(api) {
+    const pluginConfig = api.pluginConfig;
+    // Check token availability (config → env → auth profile store)
+    const tokenInfo = resolveLinearToken(pluginConfig);
+    if (!tokenInfo.accessToken) {
+        api.logger.warn("Linear: no access token found. Options: (1) run OAuth flow, (2) set LINEAR_ACCESS_TOKEN env var, " +
+            "(3) add accessToken to plugin config. Agent pipeline will not function without it.");
+    }
+    // Register Linear as an auth provider (OAuth flow with agent scopes)
+    registerLinearProvider(api);
+    // Register CLI commands: openclaw openclaw-linear auth|status
+    api.registerCli(({ program }) => registerCli(program, api), {
+        commands: ["openclaw-linear"],
+    });
+    // Register Linear tools for the agent
+    api.registerTool((ctx) => {
+        return createLinearTools(api, ctx);
+    });
+    // Register planner tools (context injected at runtime via setActivePlannerContext)
+    api.registerTool(() => createPlannerTools());
+    // Register dispatch_history tool for agent context
+    api.registerTool(() => createDispatchHistoryTool(api, pluginConfig));
+    // Register zero-LLM slash commands for dispatch ops
+    registerDispatchCommands(api);
+    // Register Linear webhook handler on a dedicated route
+    api.registerHttpRoute({
+        path: "/linear/webhook",
+        auth: "plugin",
+        match: "exact",
+        handler: async (req, res) => {
+            await handleLinearWebhook(api, req, res);
+        },
+    });
+    // Back-compat route so existing production webhook URLs keep working.
+    api.registerHttpRoute({
+        path: "/hooks/linear",
+        auth: "plugin",
+        match: "exact",
+        handler: async (req, res) => {
+            await handleLinearWebhook(api, req, res);
+        },
+    });
+    // Register OAuth callback route
+    api.registerHttpRoute({
+        path: "/linear/oauth/callback",
+        auth: "plugin",
+        match: "exact",
+        handler: async (req, res) => {
+            await handleOAuthCallback(api, req, res);
+        },
+    });
+    // Register dispatch monitor service (stale detection, session hydration, cleanup)
+    api.registerService(createDispatchService(api));
+    // Register dispatch gateway RPC methods (list, get, retry, escalate, cancel, stats)
+    registerDispatchMethods(api);
+    // Hydrate planning state on startup
+    readPlanningState(pluginConfig?.planningStatePath).then((state) => {
+        for (const session of Object.values(state.sessions)) {
+            if (session.status === "interviewing" || session.status === "plan_review") {
+                setPlanningCache(session);
+                api.logger.info(`Planning: restored session for ${session.projectName} (${session.rootIdentifier})`);
+            }
+        }
+    }).catch((err) => api.logger.warn(`Planning state hydration failed: ${err}`));
+    // ---------------------------------------------------------------------------
+    // Dispatch pipeline v2: notifier + completion lifecycle hooks
+    // ---------------------------------------------------------------------------
+    // Instantiate notifier (Discord, Slack, or both — config-driven)
+    const notify = createNotifierFromConfig(pluginConfig, api.runtime, api);
+    // ---------------------------------------------------------------------------
+    // Typed dispatch completion handler (shared by agent_end + subagent_ended)
+    // ---------------------------------------------------------------------------
+    const handleDispatchCompletion = async (sessionKey, success, output, hookName) => {
+        const statePath = pluginConfig?.dispatchStatePath;
+        const state = await readDispatchState(statePath);
+        const mapping = lookupSessionMapping(state, sessionKey);
+        if (!mapping)
+            return; // Not a dispatch sub-agent
+        const dispatch = getActiveDispatch(state, mapping.dispatchId);
+        if (!dispatch) {
+            api.logger.info(`${hookName}: dispatch ${mapping.dispatchId} no longer active`);
+            return;
+        }
+        // Stale event rejection — only process if attempt matches
+        if (dispatch.attempt !== mapping.attempt) {
+            api.logger.info(`${hookName}: stale event for ${mapping.dispatchId} ` +
+                `(event attempt=${mapping.attempt}, current=${dispatch.attempt})`);
+            return;
+        }
+        // Create Linear API for hook context
+        const tokenInfo = resolveLinearToken(pluginConfig);
+        if (!tokenInfo.accessToken) {
+            api.logger.error(`${hookName}: no Linear access token — cannot process dispatch event`);
+            return;
+        }
+        const linearApi = new LinearAgentApi(tokenInfo.accessToken, {
+            refreshToken: tokenInfo.refreshToken,
+            expiresAt: tokenInfo.expiresAt,
+        });
+        const hookCtx = {
+            api,
+            linearApi,
+            notify,
+            pluginConfig,
+            configPath: statePath,
+        };
+        if (mapping.phase === "worker") {
+            api.logger.info(`${hookName}: worker completed for ${mapping.dispatchId} - triggering audit`);
+            await triggerAudit(hookCtx, dispatch, { success, output }, sessionKey);
+        }
+        else if (mapping.phase === "audit") {
+            api.logger.info(`${hookName}: audit completed for ${mapping.dispatchId} - processing verdict`);
+            await processVerdict(hookCtx, dispatch, { success, output }, sessionKey);
+        }
+    };
+    const escalateDispatchError = async (sessionKey, err, hookName) => {
+        try {
+            const statePath = pluginConfig?.dispatchStatePath;
+            const state = await readDispatchState(statePath);
+            const mapping = sessionKey ? lookupSessionMapping(state, sessionKey) : null;
+            if (mapping) {
+                const dispatch = getActiveDispatch(state, mapping.dispatchId);
+                if (dispatch && dispatch.status !== "done" && dispatch.status !== "stuck" && dispatch.status !== "failed") {
+                    const stuckReason = `Hook error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500);
+                    await transitionDispatch(mapping.dispatchId, dispatch.status, "stuck", { stuckReason }, statePath);
+                    // Mirror the hook-error escalation into the openclaw task-flow
+                    // registry so the managed flow doesn't sit in "running" forever.
+                    markFlowTerminal(api, dispatch, "failed", stuckReason);
+                    await notify("escalation", {
+                        identifier: dispatch.issueIdentifier,
+                        title: dispatch.issueTitle ?? "Unknown",
+                        status: "stuck",
+                        reason: `Dispatch failed in ${mapping.phase} phase: ${stuckReason}`,
+                    }).catch(() => { });
+                }
+            }
+        }
+        catch (escalateErr) {
+            api.logger.error(`${hookName} escalation also failed: ${escalateErr}`);
+        }
+    };
+    // agent_end — fires when an agent run completes (primary dispatch handler)
+    api.on("agent_end", async (event, ctx) => {
+        const sessionKey = ctx?.sessionKey ?? "";
+        if (!sessionKey)
+            return;
+        try {
+            const output = extractCompletionOutput(event);
+            const success = parseCompletionSuccess(event);
+            await handleDispatchCompletion(sessionKey, success, output, "agent_end");
+        }
+        catch (err) {
+            api.logger.error(`agent_end hook error: ${err}`);
+            await escalateDispatchError(sessionKey, err, "agent_end");
+        }
+    });
+    // subagent_ended — fires when a subagent session ends (proper lifecycle hook, new in 3.7)
+    // This catches sessions_spawn sub-agents with structured outcome data.
+    api.on("subagent_ended", async (event, ctx) => {
+        const sessionKey = event.targetSessionKey ?? ctx?.childSessionKey ?? "";
+        if (!sessionKey)
+            return;
+        try {
+            const success = event.outcome === "ok";
+            const output = event.error ?? event.reason ?? "";
+            await handleDispatchCompletion(sessionKey, success, output, "subagent_ended");
+        }
+        catch (err) {
+            api.logger.error(`subagent_ended hook error: ${err}`);
+            await escalateDispatchError(sessionKey, err, "subagent_ended");
+        }
+    });
+    // session_start — track dispatch session lifecycle
+    api.on("session_start", async (event, ctx) => {
+        const sessionKey = ctx?.sessionKey ?? event?.sessionKey ?? "";
+        if (!sessionKey)
+            return;
+        try {
+            const statePath = pluginConfig?.dispatchStatePath;
+            const state = await readDispatchState(statePath);
+            const mapping = lookupSessionMapping(state, sessionKey);
+            if (mapping) {
+                api.logger.info(`session_start: dispatch ${mapping.dispatchId} phase=${mapping.phase} session started`);
+            }
+        }
+        catch {
+            // Never block session start for telemetry
+        }
+    });
+    // session_end — log dispatch session duration for observability
+    api.on("session_end", async (event, ctx) => {
+        const sessionKey = ctx?.sessionKey ?? event?.sessionKey ?? "";
+        if (!sessionKey)
+            return;
+        try {
+            const statePath = pluginConfig?.dispatchStatePath;
+            const state = await readDispatchState(statePath);
+            const mapping = lookupSessionMapping(state, sessionKey);
+            if (mapping) {
+                const durationSec = event.durationMs ? Math.round(event.durationMs / 1000) : "?";
+                api.logger.info(`session_end: dispatch ${mapping.dispatchId} phase=${mapping.phase} ` +
+                    `messages=${event.messageCount} duration=${durationSec}s`);
+            }
+        }
+        catch {
+            // Never block session end for telemetry
+        }
+    });
+    // after_compaction — log when dispatch sessions compact (visibility into context pressure)
+    api.on("after_compaction", async (event, ctx) => {
+        const sessionKey = ctx?.sessionKey ?? "";
+        if (!sessionKey)
+            return;
+        try {
+            const statePath = pluginConfig?.dispatchStatePath;
+            const state = await readDispatchState(statePath);
+            const mapping = lookupSessionMapping(state, sessionKey);
+            if (mapping) {
+                api.logger.warn(`after_compaction: dispatch ${mapping.dispatchId} phase=${mapping.phase} ` +
+                    `compacted ${event.compactedCount} messages (${event.messageCount} remaining)`);
+            }
+        }
+        catch {
+            // Never block compaction pipeline
+        }
+    });
+    // before_reset — clean up dispatch tracking when a session is reset
+    api.on("before_reset", async (event, ctx) => {
+        const sessionKey = ctx?.sessionKey ?? "";
+        if (!sessionKey)
+            return;
+        try {
+            const statePath = pluginConfig?.dispatchStatePath;
+            const state = await readDispatchState(statePath);
+            const mapping = lookupSessionMapping(state, sessionKey);
+            if (mapping) {
+                api.logger.warn(`before_reset: dispatch ${mapping.dispatchId} phase=${mapping.phase} session reset ` +
+                    `(reason: ${event.reason ?? "unknown"})`);
+            }
+        }
+        catch {
+            // Never block reset
+        }
+    });
+    api.logger.info("Dispatch lifecycle hooks registered: agent_end, subagent_ended, session_start, session_end, after_compaction, before_reset");
+    // Inject recent dispatch history as context for worker/audit agents.
+    api.on("before_prompt_build", async (_event, ctx) => {
+        try {
+            const sessionKey = ctx?.sessionKey ?? "";
+            if (!sessionKey.startsWith("linear-worker-") && !sessionKey.startsWith("linear-audit-"))
+                return;
+            const statePath = pluginConfig?.dispatchStatePath;
+            const state = await readStateForHook(statePath);
+            const active = listActiveForHook(state);
+            // Include up to 3 recent active dispatches as context
+            const recent = active.slice(0, 3);
+            if (recent.length === 0)
+                return;
+            const lines = recent.map(d => `- **${d.issueIdentifier}** (${d.tier}): ${d.status}, attempt ${d.attempt}`);
+            return {
+                prependContext: `<dispatch-history>\nActive dispatches:\n${lines.join("\n")}\n</dispatch-history>\n\n`,
+            };
+        }
+        catch {
+            // Never block agent start for telemetry
+        }
+    });
+    // Hard gate: prepend planning-only constraints to code_run when issue is not "started".
+    // Even if the orchestrator LLM ignores scope rules, the coding agent receives hard constraints.
+    api.on("before_tool_call", async (event, _ctx) => {
+        if (event.toolName !== "code_run")
+            return;
+        const { getCurrentSession } = await import("./src/pipeline/active-session.js");
+        const session = getCurrentSession();
+        if (!session?.issueId)
+            return; // Non-Linear context, allow
+        // Check issue state
+        const hookTokenInfo = resolveLinearToken(pluginConfig);
+        if (!hookTokenInfo.accessToken)
+            return;
+        const hookLinearApi = new LinearAgentApi(hookTokenInfo.accessToken, {
+            refreshToken: hookTokenInfo.refreshToken,
+            expiresAt: hookTokenInfo.expiresAt,
+        });
+        try {
+            const issue = await hookLinearApi.getIssueDetails(session.issueId);
+            const stateType = issue?.state?.type ?? "";
+            const isStarted = stateType === "started";
+            if (!isStarted) {
+                const constraint = [
+                    "CRITICAL CONSTRAINT — PLANNING MODE ONLY:",
+                    `This issue (${session.issueIdentifier}) is in "${issue?.state?.name ?? stateType}" state — NOT In Progress.`,
+                    "You may ONLY:",
+                    "- Read and explore files to understand the codebase",
+                    "- Write plan files (PLAN.md, notes, design outlines)",
+                    "- Search code to inform planning",
+                    "You MUST NOT:",
+                    "- Create, modify, or delete source code, config, or infrastructure files",
+                    "- Run system commands that change state (deploys, installs, migrations)",
+                    "- Make external API requests that modify data",
+                    "- Build, implement, or scaffold any application code",
+                    "Plan and explore ONLY. Do not implement anything.",
+                    "---",
+                ].join("\n");
+                const originalPrompt = event.params?.prompt ?? "";
+                return {
+                    params: { ...event.params, prompt: `${constraint}\n${originalPrompt}` },
+                };
+            }
+        }
+        catch (err) {
+            api.logger.warn(`before_tool_call: issue state check failed: ${err}`);
+            // Don't block on failure — fall through to allow
+        }
+    });
+    // Narration Guard: catch short "Let me explore..." responses that narrate intent
+    // without actually calling tools, and append a warning for the user.
+    const NARRATION_PATTERNS = [
+        /let me (explore|look|investigate|check|dig|analyze|search|find|review|examine)/i,
+        /i('ll| will) (explore|look into|investigate|check|dig into|analyze|search|find|review)/i,
+        /let me (take a look|dive into|pull up|go through)/i,
+    ];
+    const MAX_SHORT_RESPONSE = 250;
+    api.on("message_sending", (event) => {
+        const text = event?.content ?? "";
+        if (!text || text.length > MAX_SHORT_RESPONSE)
+            return;
+        const isNarration = NARRATION_PATTERNS.some((p) => p.test(text));
+        if (!isNarration)
+            return;
+        api.logger.warn(`Narration guard triggered: "${text.slice(0, 80)}..."`);
+        return {
+            content: text +
+                "\n\n⚠️ _Agent acknowledged but may not have completed the task. Try asking again or rephrase your request._",
+        };
+    });
+    // Check CLI availability (Codex, Claude, Gemini)
+    const cliChecks = {};
+    const defaultBinDir = join(process.env.HOME ?? homedir(), ".npm-global", "bin");
+    const cliBins = [
+        ["codex", pluginConfig?.codexBin ?? join(defaultBinDir, "codex"), "npm install -g @openai/codex"],
+        ["claude", pluginConfig?.claudeBin ?? join(defaultBinDir, "claude"), "npm install -g @anthropic-ai/claude-code"],
+        ["gemini", pluginConfig?.geminiBin ?? join(defaultBinDir, "gemini"), "npm install -g @anthropic-ai/gemini-cli"],
+    ];
+    for (const [name, bin, installCmd] of cliBins) {
+        try {
+            const raw = execFileSync(bin, ["--version"], {
+                encoding: "utf8",
+                timeout: 15_000,
+                env: { ...process.env, CLAUDECODE: undefined },
+            }).trim();
+            cliChecks[name] = raw || "unknown";
+        }
+        catch {
+            // Fallback: check if the file exists (execFileSync can fail in worker contexts)
+            try {
+                require("node:fs").accessSync(bin, require("node:fs").constants.X_OK);
+                cliChecks[name] = "installed (version check skipped)";
+            }
+            catch {
+                cliChecks[name] = "not found";
+                api.logger.warn(`${name} CLI not found at ${bin}. The ${name}_run tool will fail. Install with: ${installCmd}`);
+            }
+        }
+    }
+    const agentId = pluginConfig?.defaultAgentId ?? "default";
+    const orchestration = pluginConfig?.enableOrchestration !== false ? "enabled" : "disabled";
+    const cliSummary = Object.entries(cliChecks).map(([k, v]) => `${k}: ${v}`).join(", ");
+    api.logger.info(`Linear agent extension registered (agent: ${agentId}, token: ${tokenInfo.source !== "none" ? `${tokenInfo.source}` : "missing"}, ${cliSummary}, orchestration: ${orchestration})`);
+    // Start proactive token refresh timer (runs immediately, then every 6h)
+    startTokenRefreshTimer(api, pluginConfig);
+    // Clean up timer on process exit
+    process.on("beforeExit", () => stopTokenRefreshTimer());
+}

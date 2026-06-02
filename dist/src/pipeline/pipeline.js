@@ -1,0 +1,902 @@
+/**
+ * pipeline.ts — Dispatch pipeline v2: hook-driven with hard-enforced audit.
+ *
+ * v1 (runFullPipeline) ran plan→implement→audit in a single synchronous flow
+ * with the same agent self-certifying its own work.
+ *
+ * v2 splits into:
+ * - Worker phase: orchestrator spawns worker via plugin code, worker plans + implements
+ * - Audit phase: agent_end hook auto-triggers independent audit (runAgent)
+ * - Verdict phase: agent_end hook processes audit result → done/rework/stuck
+ *
+ * Prompts are loaded from prompts.yaml (sidecar file, customizable).
+ */
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
+import { runAgent } from "../agent/agent.js";
+import { clearActiveSession } from "./active-session.js";
+import { getCachedGuidanceForTeam, isGuidanceEnabled } from "./guidance.js";
+import { transitionDispatch, registerSessionMapping, markEventProcessed, completeDispatch, TransitionError, readDispatchState, getActiveDispatch, updateDispatchTaskFlowRevision, } from "./dispatch-state.js";
+import { recordPhaseTask, markFlowTerminal, markFlowWaiting, markFlowResumed, } from "./taskflow-bridge.js";
+import { onProjectIssueCompleted, onProjectIssueStuck } from "./dag-dispatch.js";
+import { saveWorkerOutput, saveAuditVerdict, appendLog, updateManifest, writeSummary, buildSummaryFromArtifacts, writeDispatchMemory, resolveOrchestratorWorkspace, } from "./artifacts.js";
+import { resolveWatchdogConfig } from "../agent/watchdog.js";
+import { emitDiagnostic } from "../infra/observability.js";
+import { renderTemplate } from "../infra/template.js";
+import { getWorktreeStatus, createPullRequest } from "../infra/codex-worktree.js";
+// ---------------------------------------------------------------------------
+// Linear issue state transitions (best-effort)
+// ---------------------------------------------------------------------------
+/**
+ * Transition a Linear issue to a target state by type (e.g., "started", "completed", "triage").
+ * Resolves the team's workflow states and finds a matching state.
+ * All transitions are best-effort — failures are logged as warnings, never thrown.
+ */
+async function transitionLinearIssueState(linearApi, issueId, teamId, targetStateType, opts, logger) {
+    if (!teamId) {
+        logger?.warn(`[linear-state] no teamId — skipping state transition to ${targetStateType}`);
+        return;
+    }
+    try {
+        const states = await linearApi.getTeamStates(teamId);
+        // Prefer a specific state name if provided, otherwise match by type
+        let target = opts?.preferredStateName
+            ? states.find(s => s.name === opts.preferredStateName) ?? states.find(s => s.type === targetStateType)
+            : states.find(s => s.type === targetStateType);
+        if (target) {
+            await linearApi.updateIssue(issueId, { stateId: target.id });
+            logger?.info(`[linear-state] ${issueId} → ${target.name} (type=${target.type})`);
+        }
+        else {
+            logger?.warn(`[linear-state] no state with type="${targetStateType}" found for team ${teamId}`);
+        }
+    }
+    catch (err) {
+        logger?.warn(`[linear-state] failed to transition ${issueId} to ${targetStateType}: ${err}`);
+    }
+}
+/**
+ * Transition a Linear issue to "In Review" if it exists, otherwise "Done".
+ * Used after audit pass when a PR was created.
+ */
+async function transitionToReviewOrDone(linearApi, issueId, teamId, hasPr, logger) {
+    if (!teamId)
+        return;
+    try {
+        const states = await linearApi.getTeamStates(teamId);
+        if (hasPr) {
+            // Prefer "In Review" state; fall back to any "started" state named "In Review", then "completed"
+            const inReview = states.find(s => s.name === "In Review")
+                ?? states.find(s => s.type === "started" && s.name.toLowerCase().includes("review"));
+            if (inReview) {
+                await linearApi.updateIssue(issueId, { stateId: inReview.id });
+                logger?.info(`[linear-state] ${issueId} → ${inReview.name} (PR created)`);
+                return;
+            }
+        }
+        // No PR or no "In Review" state — mark as Done
+        const done = states.find(s => s.type === "completed");
+        if (done) {
+            await linearApi.updateIssue(issueId, { stateId: done.id });
+            logger?.info(`[linear-state] ${issueId} → ${done.name} (completed)`);
+        }
+    }
+    catch (err) {
+        logger?.warn(`[linear-state] failed to transition ${issueId} to review/done: ${err}`);
+    }
+}
+const DEFAULT_PROMPTS = {
+    worker: {
+        system: "You are a coding worker implementing a Linear issue. Your ONLY job is to write code and return a text summary. Do NOT attempt to update, close, comment on, or modify the Linear issue. Do NOT mark the issue as Done.",
+        task: "Implement issue {{identifier}}: {{title}}\n\nIssue body:\n{{description}}\n\nWorktree: {{worktreePath}}\n{{projectContext}}\n\nBefore coding, read CLAUDE.md and AGENTS.md in the worktree root for project conventions and guidelines. If they don't exist, explore the codebase first.\n\nImplement the solution, run tests, commit your work, and return a text summary.",
+    },
+    audit: {
+        system: "You are an independent auditor. The Linear issue body is the SOURCE OF TRUTH. Worker comments are secondary evidence.",
+        task: 'Audit issue {{identifier}}: {{title}}\n\nIssue body:\n{{description}}\n\nWorktree: {{worktreePath}}\n{{projectContext}}\n\nRead CLAUDE.md and AGENTS.md in the worktree root for project standards.\n\nReturn JSON verdict: {"pass": true/false, "criteria": [...], "gaps": [...], "testResults": "..."}',
+    },
+    rework: {
+        addendum: "PREVIOUS AUDIT FAILED (attempt {{attempt}}). Gaps:\n{{gaps}}\n\nAddress these specific issues. Preserve correct code from prior attempts.",
+    },
+};
+let _cachedGlobalPrompts = null;
+const _projectPromptCache = new Map();
+/**
+ * Merge two prompt layers. Overlay replaces individual fields per section
+ * (shallow section-level merge, not deep).
+ */
+function mergePromptLayers(base, overlay) {
+    return {
+        worker: { ...base.worker, ...overlay.worker },
+        audit: { ...base.audit, ...overlay.audit },
+        rework: { ...base.rework, ...overlay.rework },
+    };
+}
+/**
+ * Load and parse the raw prompts YAML file (global promptsPath or sidecar).
+ * Returns the parsed object, or null if no file found.
+ * Shared by both pipeline and planner prompt loaders.
+ */
+export function loadRawPromptYaml(pluginConfig) {
+    try {
+        const customPath = pluginConfig?.promptsPath;
+        let raw;
+        if (customPath) {
+            const resolved = customPath.startsWith("~")
+                ? customPath.replace("~", process.env.HOME ?? "")
+                : customPath;
+            raw = readFileSync(resolved, "utf-8");
+        }
+        else {
+            const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
+            raw = readFileSync(join(pluginRoot, "prompts.yaml"), "utf-8");
+        }
+        return parseYaml(raw);
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Load global prompts (layers 1+2: hardcoded defaults + global promptsPath override).
+ * Cached after first load.
+ */
+function loadGlobalPrompts(pluginConfig) {
+    if (_cachedGlobalPrompts)
+        return _cachedGlobalPrompts;
+    const parsed = loadRawPromptYaml(pluginConfig);
+    if (parsed) {
+        _cachedGlobalPrompts = mergePromptLayers(DEFAULT_PROMPTS, parsed);
+    }
+    else {
+        _cachedGlobalPrompts = DEFAULT_PROMPTS;
+    }
+    return _cachedGlobalPrompts;
+}
+/**
+ * Load prompts with three-layer merge:
+ * 1. Built-in defaults (hardcoded DEFAULT_PROMPTS)
+ * 2. Global override (promptsPath or sidecar prompts.yaml)
+ * 3. Per-project override ({worktreePath}/.claw/prompts.yaml) — optional
+ */
+export function loadPrompts(pluginConfig, worktreePath) {
+    const global = loadGlobalPrompts(pluginConfig);
+    if (!worktreePath)
+        return global;
+    // Check per-project cache
+    const cached = _projectPromptCache.get(worktreePath);
+    if (cached)
+        return cached;
+    // Try loading per-project prompts
+    try {
+        const projectPromptsPath = join(worktreePath, ".claw", "prompts.yaml");
+        const raw = readFileSync(projectPromptsPath, "utf-8");
+        const parsed = parseYaml(raw);
+        const merged = mergePromptLayers(global, parsed);
+        _projectPromptCache.set(worktreePath, merged);
+        return merged;
+    }
+    catch {
+        // No per-project override — use global
+        return global;
+    }
+}
+/** Clear prompt cache (for testing or after config change) */
+export function clearPromptCache() {
+    _cachedGlobalPrompts = null;
+    _projectPromptCache.clear();
+}
+// ---------------------------------------------------------------------------
+// Project context builder
+// ---------------------------------------------------------------------------
+/**
+ * Build a project context block from plugin config.
+ *
+ * Provides structural info only: project name and repo paths.
+ * Framework, build/test commands, and conventions belong in CLAUDE.md
+ * and AGENTS.md in the repo root — agents are instructed to read those.
+ */
+export function buildProjectContext(pluginConfig) {
+    if (!pluginConfig)
+        return "";
+    const lines = [];
+    // Project name
+    const projectName = pluginConfig.projectName;
+    if (projectName)
+        lines.push(`Project: ${projectName}`);
+    // Repo(s)
+    const repos = pluginConfig.repos;
+    const baseRepo = pluginConfig.codexBaseRepo;
+    if (repos && Object.keys(repos).length > 0) {
+        lines.push(`Repos: ${Object.entries(repos).map(([k, v]) => `${k} (${v})`).join(", ")}`);
+    }
+    else if (baseRepo) {
+        lines.push(`Repo: ${baseRepo}`);
+    }
+    if (lines.length === 0)
+        return "";
+    return "## Project Context\n" + lines.join("\n");
+}
+/**
+ * Build the task prompt for a worker sub-agent (sessions_spawn).
+ * Includes rework addendum if attempt > 0.
+ */
+export function buildWorkerTask(issue, worktreePath, opts) {
+    const prompts = loadPrompts(opts?.pluginConfig, worktreePath);
+    const vars = {
+        identifier: issue.identifier,
+        title: issue.title,
+        description: issue.description ?? "(no description)",
+        worktreePath,
+        tier: "",
+        attempt: String(opts?.attempt ?? 0),
+        gaps: opts?.gaps?.length ? "- " + opts.gaps.join("\n- ") : "",
+        guidance: opts?.guidance
+            ? `\n---\n## IMPORTANT — Workspace Guidance (MUST follow)\nThe workspace owner has set the following mandatory instructions. You MUST incorporate these into your response:\n\n${opts.guidance.slice(0, 2000)}\n---`
+            : "",
+        projectContext: buildProjectContext(opts?.pluginConfig),
+        teamContext: opts?.teamContext ?? "",
+    };
+    let task = renderTemplate(prompts.worker.task, vars);
+    if ((opts?.attempt ?? 0) > 0 && opts?.gaps?.length) {
+        task += "\n\n" + renderTemplate(prompts.rework.addendum, vars);
+    }
+    return {
+        system: renderTemplate(prompts.worker.system, vars),
+        task,
+    };
+}
+/**
+ * Build the task prompt for an audit sub-agent (runAgent).
+ */
+export function buildAuditTask(issue, worktreePath, pluginConfig, opts) {
+    const prompts = loadPrompts(pluginConfig, worktreePath);
+    const vars = {
+        identifier: issue.identifier,
+        title: issue.title,
+        description: issue.description ?? "(no description)",
+        worktreePath,
+        tier: "",
+        attempt: "0",
+        gaps: "",
+        guidance: opts?.guidance
+            ? `\n---\n## IMPORTANT — Workspace Guidance (MUST follow)\nThe workspace owner has set the following mandatory instructions. You MUST incorporate these into your response:\n\n${opts.guidance.slice(0, 2000)}\n---`
+            : "",
+        projectContext: buildProjectContext(pluginConfig),
+        teamContext: opts?.teamContext ?? "",
+    };
+    return {
+        system: renderTemplate(prompts.audit.system, vars),
+        task: renderTemplate(prompts.audit.task, vars),
+    };
+}
+/**
+ * Parse the audit verdict JSON from the agent's output.
+ * Looks for the last JSON object in the output that matches the verdict shape.
+ */
+export function parseVerdict(output) {
+    // Try to find JSON in the output (last occurrence)
+    const jsonMatches = output.match(/\{[^{}]*"pass"\s*:\s*(true|false)[^{}]*\}/g);
+    if (!jsonMatches?.length)
+        return null;
+    for (const match of jsonMatches.reverse()) {
+        try {
+            const parsed = JSON.parse(match);
+            if (typeof parsed.pass === "boolean") {
+                return {
+                    pass: parsed.pass,
+                    criteria: Array.isArray(parsed.criteria) ? parsed.criteria : [],
+                    gaps: Array.isArray(parsed.gaps) ? parsed.gaps : [],
+                    testResults: typeof parsed.testResults === "string" ? parsed.testResults : "",
+                };
+            }
+        }
+        catch { /* try next match */ }
+    }
+    return null;
+}
+/**
+ * Triggered by agent_end hook when a worker sub-agent completes.
+ * Transitions dispatch to "auditing" and spawns an independent audit agent.
+ *
+ * Idempotent: uses CAS transition + event dedup.
+ */
+export async function triggerAudit(hookCtx, dispatch, event, sessionKey) {
+    const { api, linearApi, notify, pluginConfig, configPath } = hookCtx;
+    const TAG = `[${dispatch.issueIdentifier}]`;
+    // Dedup check
+    const eventKey = `worker-end:${sessionKey}`;
+    const isNew = await markEventProcessed(eventKey, configPath);
+    if (!isNew) {
+        api.logger.info(`${TAG} duplicate worker agent_end, skipping`);
+        return;
+    }
+    // CAS transition: working → auditing
+    try {
+        await transitionDispatch(dispatch.issueIdentifier, "working", "auditing", undefined, configPath);
+    }
+    catch (err) {
+        if (err instanceof TransitionError) {
+            api.logger.warn(`${TAG} CAS failed for audit trigger: ${err.message}`);
+            return;
+        }
+        throw err;
+    }
+    api.logger.info(`${TAG} worker completed, triggering audit (attempt ${dispatch.attempt})`);
+    emitDiagnostic(api, { event: "phase_transition", identifier: dispatch.issueIdentifier, from: "working", to: "auditing", attempt: dispatch.attempt });
+    // Mirror the worker→audit transition into the openclaw task-flow registry.
+    // setWaiting parks the managed flow on "audit" so any task-aware UI can
+    // see that the dispatch is between phases. Persist the bumped revision so
+    // subsequent calls (recordPhaseTask + markFlowTerminal) read the right
+    // expectedRevision from disk.
+    const dispatchAfterWait = markFlowWaiting(api, dispatch, "audit");
+    if (dispatchAfterWait.taskFlowRevision !== dispatch.taskFlowRevision && dispatchAfterWait.taskFlowRevision != null) {
+        await updateDispatchTaskFlowRevision(dispatch.issueIdentifier, dispatchAfterWait.taskFlowRevision, configPath);
+    }
+    // Update .claw/ manifest
+    try {
+        updateManifest(dispatch.worktreePath, { status: "auditing", attempts: dispatch.attempt });
+    }
+    catch { }
+    // Fetch fresh issue details for audit context
+    const issueDetails = await linearApi.getIssueDetails(dispatch.issueId).catch(() => null);
+    const issue = {
+        id: dispatch.issueId,
+        identifier: dispatch.issueIdentifier,
+        title: issueDetails?.title ?? dispatch.issueIdentifier,
+        description: issueDetails?.description,
+    };
+    // Build audit prompt from YAML templates
+    // For multi-repo dispatches, render worktreePath as a list of repo→path mappings
+    const effectiveAuditPath = dispatch.worktrees
+        ? dispatch.worktrees.map(w => `${w.repoName}: ${w.path}`).join("\n")
+        : dispatch.worktreePath;
+    // Look up cached guidance for audit
+    const auditTeamId = issueDetails?.team?.id;
+    const auditTeamKey = issueDetails?.team?.key;
+    const auditGuidance = (auditTeamId && isGuidanceEnabled(pluginConfig, auditTeamId))
+        ? getCachedGuidanceForTeam(auditTeamId) ?? undefined
+        : undefined;
+    // Resolve team context from teamMappings config
+    const auditTeamMappings = pluginConfig?.teamMappings;
+    const auditTeamMapping = auditTeamKey ? auditTeamMappings?.[auditTeamKey] : undefined;
+    const auditTeamContext = auditTeamMapping?.context
+        ? `\n## Team Context (${auditTeamKey})\n${auditTeamMapping.context}\n`
+        : "";
+    const auditPrompt = buildAuditTask(issue, effectiveAuditPath, pluginConfig, { guidance: auditGuidance, teamContext: auditTeamContext });
+    // Set Linear label
+    await linearApi.emitActivity(dispatch.agentSessionId ?? "", {
+        type: "thought",
+        body: `Audit triggered for ${dispatch.issueIdentifier} (attempt ${dispatch.attempt})`,
+    }).catch(() => { });
+    await notify("auditing", {
+        identifier: dispatch.issueIdentifier,
+        title: issue.title,
+        status: "auditing",
+        attempt: dispatch.attempt,
+    });
+    // Spawn audit agent via runAgent (deterministic, plugin-level — NOT sessions_spawn)
+    const auditSessionId = `linear-audit-${dispatch.issueIdentifier}-${dispatch.attempt}`;
+    // Register session mapping so the agent_end hook can find this dispatch
+    await registerSessionMapping(auditSessionId, {
+        dispatchId: dispatch.issueIdentifier,
+        phase: "audit",
+        attempt: dispatch.attempt,
+    }, configPath);
+    // Update dispatch with audit session key
+    const state = await readDispatchState(configPath);
+    const activeDispatch = getActiveDispatch(state, dispatch.issueIdentifier);
+    if (activeDispatch) {
+        activeDispatch.auditSessionKey = auditSessionId;
+    }
+    // Resolve audit agent: team mapping → plugin default
+    const auditDefaultAgentId = pluginConfig?.defaultAgentId ?? "default";
+    let auditAgentId = auditDefaultAgentId;
+    if (auditTeamKey) {
+        const auditTeamDefault = auditTeamMappings?.[auditTeamKey]?.defaultAgent;
+        if (typeof auditTeamDefault === "string") {
+            auditAgentId = auditTeamDefault;
+            api.logger.info(`${TAG} audit agent routed to ${auditAgentId} via team mapping (${auditTeamKey})`);
+        }
+    }
+    api.logger.info(`${TAG} spawning audit agent session=${auditSessionId}`);
+    // Mirror the audit phase into the openclaw task-flow registry. Best-effort.
+    recordPhaseTask(api, dispatch, "audit", auditAgentId, auditSessionId);
+    const result = await runAgent({
+        api,
+        agentId: auditAgentId,
+        sessionId: auditSessionId,
+        message: `${auditPrompt.system}\n\n${auditPrompt.task}`,
+        streaming: dispatch.agentSessionId
+            ? { linearApi, agentSessionId: dispatch.agentSessionId }
+            : undefined,
+    });
+    // runAgent returns inline (embedded runner) — process verdict directly.
+    // The agent_end hook in index.ts serves as safety net for sessions_spawn.
+    api.logger.info(`${TAG} audit completed inline (${result.output.length} chars, success=${result.success})`);
+    await processVerdict(hookCtx, dispatch, {
+        success: result.success,
+        output: result.output,
+    }, auditSessionId);
+}
+/**
+ * Triggered by agent_end hook when an audit sub-agent completes.
+ * Parses the verdict and transitions dispatch accordingly.
+ *
+ * Idempotent: uses CAS transition + event dedup.
+ */
+export async function processVerdict(hookCtx, dispatch, event, sessionKey) {
+    const { api, linearApi, notify, pluginConfig, configPath } = hookCtx;
+    const TAG = `[${dispatch.issueIdentifier}]`;
+    const maxAttempts = pluginConfig?.maxReworkAttempts ?? 2;
+    // Dedup check
+    const eventKey = `audit-end:${sessionKey}`;
+    const isNew = await markEventProcessed(eventKey, configPath);
+    if (!isNew) {
+        api.logger.info(`${TAG} duplicate audit agent_end, skipping`);
+        return;
+    }
+    // Extract output from event messages or direct output
+    let auditOutput = event.output ?? "";
+    if (!auditOutput && Array.isArray(event.messages)) {
+        // Get the last assistant message
+        for (const msg of [...event.messages].reverse()) {
+            if (msg?.role === "assistant" && typeof msg?.content === "string") {
+                auditOutput = msg.content;
+                break;
+            }
+            // Handle array content (tool use + text blocks)
+            if (msg?.role === "assistant" && Array.isArray(msg?.content)) {
+                for (const block of msg.content) {
+                    if (block?.type === "text" && typeof block?.text === "string") {
+                        auditOutput = block.text;
+                    }
+                }
+                if (auditOutput)
+                    break;
+            }
+        }
+    }
+    // Log audit interaction to .claw/
+    try {
+        appendLog(dispatch.worktreePath, {
+            ts: new Date().toISOString(), phase: "audit", attempt: dispatch.attempt,
+            agent: "auditor", prompt: "(audit task)",
+            outputPreview: auditOutput.slice(0, 500), success: event.success,
+        });
+    }
+    catch { }
+    // Parse verdict
+    const verdict = parseVerdict(auditOutput);
+    if (!verdict) {
+        api.logger.warn(`${TAG} could not parse audit verdict from output (${auditOutput.length} chars)`);
+        // Post comment so user knows what happened
+        await linearApi.createComment(dispatch.issueId, `## Audit Inconclusive\n\nThe auditor's response couldn't be parsed as a verdict. **Retrying automatically** — this usually resolves itself.\n\n**If it keeps happening:** \`openclaw openclaw-linear prompts validate\`\n\n**Status:** Retrying audit now. No action needed.`).catch((err) => api.logger.error(`${TAG} failed to post inconclusive comment: ${err}`));
+        // Treat unparseable verdict as failure
+        await handleAuditFail(hookCtx, dispatch, {
+            pass: false,
+            criteria: [],
+            gaps: ["Audit produced no parseable verdict"],
+            testResults: "",
+        });
+        return;
+    }
+    api.logger.info(`${TAG} audit verdict: ${verdict.pass ? "PASS" : "FAIL"} ` +
+        `(criteria: ${verdict.criteria.length}, gaps: ${verdict.gaps.length})`);
+    if (verdict.pass) {
+        await handleAuditPass(hookCtx, dispatch, verdict);
+    }
+    else {
+        await handleAuditFail(hookCtx, dispatch, verdict);
+    }
+}
+// ---------------------------------------------------------------------------
+// Verdict handlers
+// ---------------------------------------------------------------------------
+async function handleAuditPass(hookCtx, dispatch, verdict) {
+    const { api, linearApi, notify, pluginConfig, configPath } = hookCtx;
+    const TAG = `[${dispatch.issueIdentifier}]`;
+    // Save audit verdict to .claw/
+    try {
+        saveAuditVerdict(dispatch.worktreePath, dispatch.attempt, verdict);
+    }
+    catch { }
+    try {
+        updateManifest(dispatch.worktreePath, { status: "done", attempts: dispatch.attempt + 1 });
+    }
+    catch { }
+    // CAS transition: auditing → done
+    try {
+        await transitionDispatch(dispatch.issueIdentifier, "auditing", "done", undefined, configPath);
+    }
+    catch (err) {
+        if (err instanceof TransitionError) {
+            api.logger.warn(`${TAG} CAS failed for audit pass: ${err.message}`);
+            return;
+        }
+        throw err;
+    }
+    // Build summary from .claw/ artifacts and write to memory (before PR so body can include it)
+    let summary = null;
+    try {
+        summary = buildSummaryFromArtifacts(dispatch.worktreePath);
+        if (summary) {
+            writeSummary(dispatch.worktreePath, summary);
+            const wsDir = resolveOrchestratorWorkspace(api, pluginConfig);
+            writeDispatchMemory(dispatch.issueIdentifier, summary, wsDir, {
+                title: dispatch.issueTitle ?? dispatch.issueIdentifier,
+                tier: dispatch.tier,
+                status: "done",
+                project: dispatch.project,
+                attempts: dispatch.attempt + 1,
+                model: dispatch.model,
+            });
+            api.logger.info(`${TAG} .claw/ summary and memory written`);
+        }
+    }
+    catch (err) {
+        api.logger.warn(`${TAG} failed to write summary/memory: ${err}`);
+    }
+    // Auto-PR creation (best-effort, non-fatal)
+    let prUrl = null;
+    try {
+        const wtStatus = getWorktreeStatus(dispatch.worktreePath);
+        if (wtStatus.lastCommit) {
+            const prBody = [
+                `Fixes ${dispatch.issueIdentifier}`,
+                "",
+                "## What changed",
+                summary?.slice(0, 2000) ?? "(see audit verdict)",
+                "",
+                "## Audit",
+                `- **Criteria:** ${verdict.criteria.join(", ") || "N/A"}`,
+                `- **Tests:** ${verdict.testResults || "N/A"}`,
+                "",
+                `*Auto-generated by OpenClaw dispatch pipeline*`,
+            ].join("\n");
+            const prResult = createPullRequest(dispatch.worktreePath, `${dispatch.issueIdentifier}: ${dispatch.issueTitle ?? "implementation"}`, prBody);
+            prUrl = prResult.prUrl;
+            api.logger.info(`${TAG} PR created: ${prUrl}`);
+        }
+        else {
+            api.logger.info(`${TAG} no commits in worktree — skipping PR creation`);
+        }
+    }
+    catch (err) {
+        api.logger.warn(`${TAG} PR creation failed (non-fatal): ${err}`);
+    }
+    // Mirror terminal state into the openclaw task-flow registry first so the
+    // managed flow finishes BEFORE we lose the active dispatch record.
+    markFlowTerminal(api, dispatch, "done");
+    // Move to completed (include prUrl if PR was created)
+    await completeDispatch(dispatch.issueIdentifier, {
+        tier: dispatch.tier,
+        status: "done",
+        completedAt: new Date().toISOString(),
+        project: dispatch.project,
+        prUrl: prUrl ?? undefined,
+    }, configPath);
+    // Linear state transition: "In Review" if PR was created, otherwise "Done"
+    const issueDetails = await linearApi.getIssueDetails(dispatch.issueId).catch(() => null);
+    const teamId = issueDetails?.team?.id;
+    await transitionToReviewOrDone(linearApi, dispatch.issueId, teamId, !!prUrl, api.logger);
+    // Post approval comment (with summary excerpt and PR link if available)
+    const criteriaList = verdict.criteria.map((c) => `- ${c}`).join("\n");
+    const summaryExcerpt = summary ? `\n\n**Summary:**\n${summary.slice(0, 2000)}` : "";
+    const prLine = prUrl ? `\n- **Pull request:** ${prUrl}` : "";
+    await linearApi.createComment(dispatch.issueId, `## Done\n\nThis issue has been implemented and verified.\n\n**What was checked:**\n${criteriaList}\n\n**Test results:** ${verdict.testResults || "N/A"}${summaryExcerpt}${prLine}\n\n---\n*Completed on attempt ${dispatch.attempt + 1}.*\n\n**Next steps:**\n- Review the code: \`cd ${dispatch.worktreePath}\`\n- View artifacts: \`ls ${dispatch.worktreePath}/.claw/\`${prUrl ? "" : "\n- Create a PR from the worktree branch if one wasn't opened automatically"}`).catch((err) => api.logger.error(`${TAG} failed to post audit pass comment: ${err}`));
+    api.logger.info(`${TAG} audit PASSED — dispatch completed (attempt ${dispatch.attempt})`);
+    emitDiagnostic(api, {
+        event: "verdict_processed",
+        identifier: dispatch.issueIdentifier,
+        issueId: dispatch.issueId,
+        phase: "done",
+        attempt: dispatch.attempt,
+        tier: dispatch.tier,
+        agentId: pluginConfig?.defaultAgentId ?? "default",
+    });
+    await notify("audit_pass", {
+        identifier: dispatch.issueIdentifier,
+        title: dispatch.issueIdentifier,
+        status: "done",
+        attempt: dispatch.attempt,
+        verdict: { pass: true, gaps: [] },
+    });
+    // DAG cascade: if this issue belongs to a project dispatch, check for newly unblocked issues
+    if (dispatch.project) {
+        void onProjectIssueCompleted(hookCtx, dispatch.project, dispatch.issueIdentifier)
+            .catch((err) => api.logger.error(`${TAG} DAG cascade error: ${err}`));
+    }
+    clearActiveSession(dispatch.issueId);
+}
+async function handleAuditFail(hookCtx, dispatch, verdict) {
+    const { api, linearApi, notify, pluginConfig, configPath } = hookCtx;
+    const TAG = `[${dispatch.issueIdentifier}]`;
+    const maxAttempts = pluginConfig?.maxReworkAttempts ?? 2;
+    const nextAttempt = dispatch.attempt + 1;
+    // Save audit verdict to .claw/ (both escalation and rework paths)
+    try {
+        saveAuditVerdict(dispatch.worktreePath, dispatch.attempt, verdict);
+    }
+    catch { }
+    if (nextAttempt > maxAttempts) {
+        // Escalate — too many failures
+        try {
+            updateManifest(dispatch.worktreePath, { status: "stuck", attempts: nextAttempt });
+        }
+        catch { }
+        try {
+            await transitionDispatch(dispatch.issueIdentifier, "auditing", "stuck", { stuckReason: `audit_failed_${nextAttempt}x` }, configPath);
+        }
+        catch (err) {
+            if (err instanceof TransitionError) {
+                api.logger.warn(`${TAG} CAS failed for stuck transition: ${err.message}`);
+                return;
+            }
+            throw err;
+        }
+        // Write summary + memory for stuck dispatches too
+        try {
+            const summary = buildSummaryFromArtifacts(dispatch.worktreePath);
+            if (summary) {
+                writeSummary(dispatch.worktreePath, summary);
+                const wsDir = resolveOrchestratorWorkspace(api, pluginConfig);
+                writeDispatchMemory(dispatch.issueIdentifier, summary, wsDir, {
+                    title: dispatch.issueTitle ?? dispatch.issueIdentifier,
+                    tier: dispatch.tier,
+                    status: "stuck",
+                    project: dispatch.project,
+                    attempts: nextAttempt,
+                    model: dispatch.model,
+                });
+            }
+        }
+        catch { }
+        // Linear state transition: move to "Triage" so it shows up for human review
+        const stuckIssueDetails = await linearApi.getIssueDetails(dispatch.issueId).catch(() => null);
+        await transitionLinearIssueState(linearApi, dispatch.issueId, stuckIssueDetails?.team?.id, "triage", undefined, api.logger);
+        const gapsList = verdict.gaps.map((g) => `- ${g}`).join("\n");
+        await linearApi.createComment(dispatch.issueId, `## Needs Your Help\n\nAll ${nextAttempt} attempts failed. The agent couldn't resolve these issues on its own.\n\n**What went wrong:**\n${gapsList}\n\n**Test results:** ${verdict.testResults || "N/A"}\n\n---\n\n**What you can do:**\n1. **Clarify requirements** — update the issue body with more detail, then re-assign to try again\n2. **Fix it manually** — the agent's work is in the worktree: \`cd ${dispatch.worktreePath}\`\n3. **Force retry** — \`/dispatch retry ${dispatch.issueIdentifier}\`\n4. **View logs** — worker output: \`.claw/worker-*.md\`, audit verdicts: \`.claw/audit-*.json\``).catch((err) => api.logger.error(`${TAG} failed to post escalation comment: ${err}`));
+        api.logger.warn(`${TAG} audit FAILED ${nextAttempt}x — escalating to human`);
+        // Mirror terminal-failed into the openclaw task-flow registry.
+        markFlowTerminal(api, dispatch, "failed", `audit failed ${nextAttempt}x`);
+        emitDiagnostic(api, {
+            event: "verdict_processed",
+            identifier: dispatch.issueIdentifier,
+            issueId: dispatch.issueId,
+            phase: "stuck",
+            attempt: nextAttempt,
+            tier: dispatch.tier,
+            agentId: pluginConfig?.defaultAgentId ?? "default",
+        });
+        await notify("escalation", {
+            identifier: dispatch.issueIdentifier,
+            title: dispatch.issueIdentifier,
+            status: "stuck",
+            attempt: nextAttempt,
+            reason: `audit failed ${nextAttempt}x`,
+            verdict: { pass: false, gaps: verdict.gaps },
+        });
+        // DAG cascade: mark this issue as stuck in the project dispatch
+        if (dispatch.project) {
+            void onProjectIssueStuck(hookCtx, dispatch.project, dispatch.issueIdentifier)
+                .catch((err) => api.logger.error(`${TAG} DAG stuck cascade error: ${err}`));
+        }
+        return;
+    }
+    // Rework — transition back to working with incremented attempt
+    try {
+        await transitionDispatch(dispatch.issueIdentifier, "auditing", "working", { attempt: nextAttempt }, configPath);
+    }
+    catch (err) {
+        if (err instanceof TransitionError) {
+            api.logger.warn(`${TAG} CAS failed for rework transition: ${err.message}`);
+            return;
+        }
+        throw err;
+    }
+    // Mirror the rework transition into the openclaw task-flow registry —
+    // resume the managed flow back into the running state with currentStep
+    // reflecting the rework attempt counter. Persist the bumped revision so
+    // the next markFlowTerminal call sees the right expectedRevision.
+    const dispatchAfterResume = markFlowResumed(api, dispatch, `worker (rework attempt ${nextAttempt + 1})`);
+    if (dispatchAfterResume.taskFlowRevision !== dispatch.taskFlowRevision && dispatchAfterResume.taskFlowRevision != null) {
+        await updateDispatchTaskFlowRevision(dispatch.issueIdentifier, dispatchAfterResume.taskFlowRevision, configPath);
+    }
+    const gapsList = verdict.gaps.map((g) => `- ${g}`).join("\n");
+    await linearApi.createComment(dispatch.issueId, `## Needs More Work\n\nThe audit found gaps. **Retrying now** — the worker gets the feedback below as context.\n\n**Attempt ${nextAttempt} of ${maxAttempts + 1}** — ${maxAttempts + 1 - nextAttempt > 0 ? `${maxAttempts + 1 - nextAttempt} more ${maxAttempts + 1 - nextAttempt === 1 ? "retry" : "retries"} if this fails too` : "this is the last attempt"}.\n\n**What needs fixing:**\n${gapsList}\n\n**Test results:** ${verdict.testResults || "N/A"}\n\n**Status:** Worker is restarting with the gaps above as context. No action needed unless all retries fail.`).catch((err) => api.logger.error(`${TAG} failed to post rework comment: ${err}`));
+    api.logger.info(`${TAG} audit FAILED — rework attempt ${nextAttempt}/${maxAttempts + 1}`);
+    emitDiagnostic(api, { event: "phase_transition", identifier: dispatch.issueIdentifier, from: "auditing", to: "working", attempt: nextAttempt });
+    await notify("audit_fail", {
+        identifier: dispatch.issueIdentifier,
+        title: dispatch.issueIdentifier,
+        status: "working",
+        attempt: nextAttempt,
+        verdict: { pass: false, gaps: verdict.gaps },
+    });
+    // The webhook handler or dispatch service should re-spawn a worker
+    // with the rework context. Log emitted for observability.
+    api.logger.info(`${TAG} dispatch is back in "working" state (attempt ${nextAttempt}). ` +
+        `Orchestrator should re-spawn worker with gaps: ${verdict.gaps.join(", ")}`);
+}
+// ---------------------------------------------------------------------------
+// Worker phase (called by handleDispatch in webhook.ts)
+// ---------------------------------------------------------------------------
+/**
+ * Spawn the worker agent for a dispatch.
+ * Transitions dispatched→working, builds task, runs agent, then triggers audit.
+ *
+ * This is the main entry point for the v2 pipeline — replaces runFullPipeline.
+ */
+export async function spawnWorker(hookCtx, dispatch, opts) {
+    const { api, linearApi, pluginConfig, configPath } = hookCtx;
+    const TAG = `[${dispatch.issueIdentifier}]`;
+    // Transition dispatched → working (first run) — skip if already working (rework)
+    if (dispatch.status === "dispatched") {
+        try {
+            await transitionDispatch(dispatch.issueIdentifier, "dispatched", "working", undefined, configPath);
+        }
+        catch (err) {
+            if (err instanceof TransitionError) {
+                api.logger.warn(`${TAG} CAS failed for worker spawn: ${err.message}`);
+                return;
+            }
+            throw err;
+        }
+    }
+    // Fetch fresh issue details
+    const issueDetails = await linearApi.getIssueDetails(dispatch.issueId).catch(() => null);
+    const issue = {
+        id: dispatch.issueId,
+        identifier: dispatch.issueIdentifier,
+        title: issueDetails?.title ?? dispatch.issueIdentifier,
+        description: issueDetails?.description,
+    };
+    // Build worker prompt from YAML templates
+    // For multi-repo dispatches, render worktreePath as a list of repo→path mappings
+    const effectiveWorkerPath = dispatch.worktrees
+        ? dispatch.worktrees.map(w => `${w.repoName}: ${w.path}`).join("\n")
+        : dispatch.worktreePath;
+    // Look up cached guidance for the issue's team
+    const workerTeamId = issueDetails?.team?.id;
+    const workerTeamKey = issueDetails?.team?.key;
+    const workerGuidance = (workerTeamId && isGuidanceEnabled(pluginConfig, workerTeamId))
+        ? getCachedGuidanceForTeam(workerTeamId) ?? undefined
+        : undefined;
+    // Resolve team context from teamMappings config
+    const workerTeamMappings = pluginConfig?.teamMappings;
+    const workerTeamMapping = workerTeamKey ? workerTeamMappings?.[workerTeamKey] : undefined;
+    const workerTeamContext = workerTeamMapping?.context
+        ? `\n## Team Context (${workerTeamKey})\n${workerTeamMapping.context}\n`
+        : "";
+    const workerPrompt = buildWorkerTask(issue, effectiveWorkerPath, {
+        attempt: dispatch.attempt,
+        gaps: opts?.gaps,
+        pluginConfig,
+        guidance: workerGuidance,
+        teamContext: workerTeamContext,
+    });
+    const workerSessionId = `linear-worker-${dispatch.issueIdentifier}-${dispatch.attempt}`;
+    // Register session mapping for agent_end hook lookup
+    await registerSessionMapping(workerSessionId, {
+        dispatchId: dispatch.issueIdentifier,
+        phase: "worker",
+        attempt: dispatch.attempt,
+    }, configPath);
+    await hookCtx.notify("working", {
+        identifier: dispatch.issueIdentifier,
+        title: issue.title,
+        status: "working",
+        attempt: dispatch.attempt,
+    });
+    api.logger.info(`${TAG} spawning worker agent session=${workerSessionId} (attempt ${dispatch.attempt})`);
+    // Resolve agent: team mapping → plugin default
+    const defaultAgentId = pluginConfig?.defaultAgentId ?? "default";
+    let workerAgentId = defaultAgentId;
+    if (workerTeamKey) {
+        const teamDefault = workerTeamMappings?.[workerTeamKey]?.defaultAgent;
+        if (typeof teamDefault === "string") {
+            workerAgentId = teamDefault;
+            api.logger.info(`${TAG} worker agent routed to ${workerAgentId} via team mapping (${workerTeamKey})`);
+        }
+    }
+    // Mirror this phase into the openclaw task-flow registry. Best-effort —
+    // safe to call without checking for taskFlowId because the bridge no-ops
+    // when the runtime surface or flow state is missing.
+    recordPhaseTask(api, dispatch, "worker", workerAgentId, workerSessionId);
+    const workerStartTime = Date.now();
+    const result = await runAgent({
+        api,
+        agentId: workerAgentId,
+        sessionId: workerSessionId,
+        message: `${workerPrompt.system}\n\n${workerPrompt.task}`,
+        streaming: dispatch.agentSessionId
+            ? { linearApi, agentSessionId: dispatch.agentSessionId }
+            : undefined,
+    });
+    // Save worker output to .claw/
+    const workerElapsed = Date.now() - workerStartTime;
+    const agentId = workerAgentId;
+    try {
+        saveWorkerOutput(dispatch.worktreePath, dispatch.attempt, result.output);
+    }
+    catch { }
+    try {
+        appendLog(dispatch.worktreePath, {
+            ts: new Date().toISOString(), phase: "worker", attempt: dispatch.attempt,
+            agent: agentId,
+            prompt: workerPrompt.task.slice(0, 200),
+            outputPreview: result.output.slice(0, 500),
+            success: result.success, durationMs: workerElapsed,
+        });
+    }
+    catch { }
+    // Handle watchdog kill (runAgent already retried once — both attempts failed)
+    if (result.watchdogKilled) {
+        const wdConfig = resolveWatchdogConfig(agentId, pluginConfig ?? undefined);
+        const thresholdSec = Math.round(wdConfig.inactivityMs / 1000);
+        api.logger.warn(`${TAG} worker killed by inactivity watchdog 2x — escalating to stuck`);
+        emitDiagnostic(api, {
+            event: "watchdog_kill",
+            identifier: dispatch.issueIdentifier,
+            issueId: dispatch.issueId,
+            attempt: dispatch.attempt,
+            tier: dispatch.tier,
+            durationMs: workerElapsed,
+            agentId,
+        });
+        try {
+            appendLog(dispatch.worktreePath, {
+                ts: new Date().toISOString(), phase: "watchdog", attempt: dispatch.attempt,
+                agent: agentId, prompt: "(watchdog kill)",
+                outputPreview: result.output.slice(0, 500), success: false,
+                durationMs: workerElapsed,
+                watchdog: { reason: "inactivity", silenceSec: thresholdSec, thresholdSec, retried: true },
+            });
+        }
+        catch { }
+        try {
+            updateManifest(dispatch.worktreePath, { status: "stuck", attempts: dispatch.attempt + 1 });
+        }
+        catch { }
+        try {
+            await transitionDispatch(dispatch.issueIdentifier, "working", "stuck", { stuckReason: "watchdog_kill_2x" }, configPath);
+        }
+        catch (err) {
+            if (err instanceof TransitionError) {
+                api.logger.warn(`${TAG} CAS failed for watchdog stuck transition: ${err.message}`);
+            }
+        }
+        // Mirror watchdog-kill terminal into the openclaw task-flow registry.
+        markFlowTerminal(api, dispatch, "failed", `watchdog killed (no I/O for ${thresholdSec}s)`);
+        // Linear state transition: move to "Triage" so it shows up for human review
+        const wdIssueDetails = await linearApi.getIssueDetails(dispatch.issueId).catch(() => null);
+        await transitionLinearIssueState(linearApi, dispatch.issueId, wdIssueDetails?.team?.id, "triage", undefined, api.logger);
+        await linearApi.createComment(dispatch.issueId, `## Agent Timed Out\n\nThe agent stopped responding for over ${thresholdSec}s. It was automatically restarted, but the retry also timed out.\n\n` +
+            `**What you can do:**\n1. **Try again** — re-assign this issue or \`/dispatch retry ${dispatch.issueIdentifier}\`\n2. **Break it down** — if it keeps timing out, split into smaller issues\n3. **Increase timeout** — set \`inactivitySec\` higher in your agent profile\n\n` +
+            `**Logs:** \`${dispatch.worktreePath}/.claw/log.jsonl\` (look for \`"phase": "watchdog"\`)\n\n**Current status:** Stuck — waiting for you.`).catch(() => { });
+        await hookCtx.notify("watchdog_kill", {
+            identifier: dispatch.issueIdentifier,
+            title: issue.title,
+            status: "stuck",
+            attempt: dispatch.attempt,
+            reason: `no I/O for ${thresholdSec}s`,
+        });
+        clearActiveSession(dispatch.issueId);
+        return;
+    }
+    // runAgent returns inline — trigger audit directly.
+    // Re-read dispatch state since it may have changed during worker run.
+    const freshState = await readDispatchState(configPath);
+    const freshDispatch = getActiveDispatch(freshState, dispatch.issueIdentifier);
+    if (!freshDispatch) {
+        api.logger.warn(`${TAG} dispatch disappeared during worker run — skipping audit`);
+        return;
+    }
+    api.logger.info(`${TAG} worker completed (success=${result.success}, ${result.output.length} chars) — triggering audit`);
+    await triggerAudit(hookCtx, freshDispatch, {
+        success: result.success,
+        output: result.output,
+    }, workerSessionId);
+}

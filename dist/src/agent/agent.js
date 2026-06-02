@@ -1,0 +1,396 @@
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { mkdirSync } from "node:fs";
+import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
+function resolveAgentDirs(agentId, config) {
+    const home = homedir();
+    const agentList = config?.agents?.list;
+    const agentEntry = agentList?.find((a) => a.id === agentId);
+    // Workspace: agent-specific override → agents.defaults.workspace → fallback
+    const workspaceDir = agentEntry?.workspace
+        ?? config?.agents?.defaults?.workspace
+        ?? join(home, ".openclaw", "workspace");
+    // Agent runtime dir: always ~/.openclaw/agents/{agentId}/agent
+    // (matches OpenClaw's internal structure)
+    const agentDir = join(home, ".openclaw", "agents", agentId, "agent");
+    mkdirSync(agentDir, { recursive: true });
+    return { workspaceDir, agentDir };
+}
+/**
+ * Run an agent with automatic retry on watchdog kill.
+ *
+ * Tries embedded runner first (if streaming callbacks provided), falls back
+ * to subprocess. If the inactivity watchdog kills the run, retries once.
+ */
+export async function runAgent(params) {
+    const maxAttempts = 2;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const result = await runAgentOnce(params);
+        if (result.success || !result.watchdogKilled || attempt === maxAttempts - 1) {
+            return result;
+        }
+        params.api.logger.warn(`Agent ${params.agentId} killed by watchdog, retrying (attempt ${attempt + 1}/${maxAttempts})`);
+        // Emit Linear activity about the retry if streaming
+        if (params.streaming) {
+            params.streaming.linearApi.emitActivity(params.streaming.agentSessionId, {
+                type: "error",
+                body: `Agent killed by inactivity watchdog — no I/O for the configured threshold. Retrying...`,
+            }).catch(() => { });
+        }
+    }
+    // Unreachable, but TypeScript needs it
+    return { success: false, output: "Watchdog retry exhausted" };
+}
+// ---------------------------------------------------------------------------
+// Date/time injection — every LLM request gets the current timestamp so models
+// don't hallucinate the year (Kimi K2.5 thinks it's 2025).
+// ---------------------------------------------------------------------------
+function buildDateContext() {
+    const now = new Date();
+    const iso = now.toISOString();
+    // Human-readable: "Tuesday, February 18, 2026, 11:42 PM CST"
+    const human = now.toLocaleString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "short",
+    });
+    return `[Current date/time: ${human} (${iso})]`;
+}
+/**
+ * Single attempt to run an agent (no retry logic).
+ */
+async function runAgentOnce(params) {
+    const { api, agentId, sessionId, streaming, readOnly, toolsDeny } = params;
+    // Inject current timestamp into every LLM request
+    const message = `${buildDateContext()}\n\n${params.message}`;
+    const pluginConfig = api.pluginConfig;
+    const wdConfig = resolveWatchdogConfig(agentId, pluginConfig);
+    const timeoutMs = params.timeoutMs ?? wdConfig.maxTotalMs;
+    api.logger.info(`Dispatching agent ${agentId} for session ${sessionId} (timeout=${Math.round(timeoutMs / 1000)}s, inactivity=${Math.round(wdConfig.inactivityMs / 1000)}s${readOnly ? ", mode=READ_ONLY" : ""})`);
+    // Try embedded runner first (has streaming callbacks)
+    if (streaming) {
+        try {
+            return await runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming, wdConfig.inactivityMs, readOnly, toolsDeny);
+        }
+        catch (err) {
+            // Read-only mode MUST NOT fall back to subprocess — subprocess runs a
+            // full agent with no way to enforce the tool deny policy.
+            if (readOnly) {
+                api.logger.error(`Embedded runner failed in read-only mode, refusing subprocess fallback: ${err}`);
+                return { success: false, output: "Read-only agent run failed (embedded runner unavailable)." };
+            }
+            api.logger.warn(`Embedded runner failed, falling back to subprocess: ${err}`);
+        }
+    }
+    // Fallback: subprocess (no streaming)
+    if (readOnly) {
+        api.logger.error("Cannot run read-only agent via subprocess — no tool policy enforcement");
+        return { success: false, output: "Read-only agent run requires the embedded runner." };
+    }
+    return runSubprocess(api, agentId, sessionId, message, timeoutMs);
+}
+/**
+ * Embedded agent runner with real-time streaming to Linear and inactivity watchdog.
+ */
+// Tools denied in read-only mode.  Uses OpenClaw group:* shorthands where
+// possible (see https://docs.openclaw.ai/tools).  Covers every built-in
+// tool that can mutate the filesystem, execute commands, or produce
+// side-effects beyond the Linear API calls the plugin makes after the run.
+//
+// NOT denied (read-only tools the triage agent keeps):
+//   read, glob, grep/search          — codebase inspection
+//   group:web (web_search, web_fetch) — external context
+//   group:memory (memory_search/get)  — knowledge retrieval
+//   sessions_list, sessions_history   — read-only introspection
+const READ_ONLY_DENY = [
+    // group:fs = read + write + edit + apply_patch — but we need read,
+    // so deny the write-capable members individually.
+    "write", "edit", "apply_patch",
+    // Full groups that are entirely write/side-effect oriented:
+    "group:runtime", // exec, bash, process
+    "group:messaging", // message
+    "group:ui", // browser, canvas
+    "group:automation", // cron, gateway
+    "group:nodes", // nodes
+    // Individual tools not covered by a group:
+    "sessions_spawn", "sessions_send", // agent orchestration
+    "tts", // audio file generation
+    "image", // image file generation
+];
+async function runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming, inactivityMs, readOnly, toolsDeny) {
+    // Load config so we can resolve agent dirs and providers correctly.
+    const origConfig = await api.runtime.config.loadConfig();
+    let config = origConfig;
+    let configAny = config;
+    // ── Read-only enforcement ──────────────────────────────────────────
+    // Clone the config and inject a tools.deny policy that strips every
+    // write-capable tool.  The deny list is merged with any existing deny
+    // entries so we don't clobber operator-level restrictions.
+    if (readOnly) {
+        configAny = JSON.parse(JSON.stringify(configAny));
+        config = configAny;
+        if (!configAny.tools)
+            configAny.tools = {};
+        const existing = Array.isArray(configAny.tools.deny) ? configAny.tools.deny : [];
+        configAny.tools.deny = [...new Set([...existing, ...READ_ONLY_DENY])];
+        api.logger.info(`Read-only mode: tools.deny = [${configAny.tools.deny.join(", ")}]`);
+    }
+    // ── Additional toolsDeny entries ─────────────────────────────────────
+    if (toolsDeny?.length) {
+        if (config === origConfig) {
+            configAny = JSON.parse(JSON.stringify(origConfig));
+            config = configAny;
+        }
+        if (!configAny.tools)
+            configAny.tools = {};
+        const existing = Array.isArray(configAny.tools.deny) ? configAny.tools.deny : [];
+        configAny.tools.deny = [...new Set([...existing, ...toolsDeny])];
+    }
+    // Resolve workspace and agent dirs from config (ext API ignores agentId).
+    const dirs = resolveAgentDirs(agentId, configAny);
+    const { workspaceDir, agentDir } = dirs;
+    const runId = randomUUID();
+    // Build session file path under the correct agent's sessions directory.
+    const sessionsDir = join(agentDir, "sessions");
+    try {
+        mkdirSync(sessionsDir, { recursive: true });
+    }
+    catch { }
+    const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
+    // Resolve model/provider from config — default is anthropic which requires
+    // a separate API key. Our agents use openrouter.
+    const agentList = configAny?.agents?.list;
+    const agentEntry = agentList?.find((a) => a.id === agentId);
+    const modelRef = agentEntry?.model?.primary ??
+        configAny?.agents?.defaults?.model?.primary ??
+        `${api.runtime.agent.defaults.provider}/${api.runtime.agent.defaults.model}`;
+    // Parse "provider/model-id" format (e.g. "openrouter/moonshotai/kimi-k2.5")
+    const slashIdx = modelRef.indexOf("/");
+    const provider = slashIdx > 0 ? modelRef.slice(0, slashIdx) : api.runtime.agent.defaults.provider;
+    const model = slashIdx > 0 ? modelRef.slice(slashIdx + 1) : modelRef;
+    api.logger.info(`Embedded agent run: agent=${agentId} session=${sessionId} runId=${runId} provider=${provider} model=${model} workspaceDir=${workspaceDir} agentDir=${agentDir}`);
+    const emit = (content) => {
+        streaming.linearApi.emitActivity(streaming.agentSessionId, content).catch((err) => {
+            api.logger.warn(`Activity emit failed: ${err}`);
+        });
+    };
+    // --- Inactivity watchdog ---
+    const controller = new AbortController();
+    const watchdog = new InactivityWatchdog({
+        inactivityMs,
+        label: `embedded:${agentId}:${sessionId}`,
+        logger: api.logger,
+        onKill: () => {
+            // The AbortController wired to runEmbeddedPiAgent below is the
+            // canonical way to stop an in-flight embedded run; no extra
+            // host-side abort call is needed.
+            controller.abort();
+        },
+    });
+    // Track last emitted tool to avoid duplicates
+    let lastToolAction = "";
+    // Derive a friendly label from cli_ tool names: cli_codex→"Codex", cli_claude→"Claude"
+    const cliLabel = (name) => name.startsWith("cli_") ? name.slice(4).charAt(0).toUpperCase() + name.slice(5) : name;
+    watchdog.start();
+    const result = await api.runtime.agent.runEmbeddedPiAgent({
+        sessionId,
+        sessionFile,
+        workspaceDir,
+        agentDir,
+        prompt: message,
+        agentId,
+        runId,
+        timeoutMs,
+        config,
+        provider,
+        model,
+        abortSignal: controller.signal,
+        shouldEmitToolResult: () => true,
+        shouldEmitToolOutput: () => true,
+        ...(readOnly ? {
+            extraSystemPrompt: [
+                "READ-ONLY MODE: You may read and search files but you MUST NOT",
+                "write, edit, create, or delete any files. Do not run shell commands.",
+                "Your only output is your text response.",
+            ].join(" "),
+        } : {}),
+        // Stream reasoning/thinking to Linear
+        onReasoningStream: (payload) => {
+            watchdog.tick();
+            const text = payload.text?.trim();
+            if (text && text.length > 10) {
+                emit({ type: "thought", body: text.slice(0, 500) });
+            }
+        },
+        // Stream tool results to Linear
+        onToolResult: (payload) => {
+            watchdog.tick();
+            const text = payload.text?.trim();
+            if (text) {
+                // Truncate tool results for activity display
+                const truncated = text.length > 300 ? text.slice(0, 300) + "..." : text;
+                const prefix = lastToolAction.startsWith("cli_") ? `[${cliLabel(lastToolAction)}] ` : "";
+                emit({ type: "action", action: `${prefix}${lastToolAction || "Tool result"}`, parameter: truncated });
+            }
+        },
+        // Raw agent events — capture tool starts/ends/updates
+        onAgentEvent: (evt) => {
+            watchdog.tick();
+            const { stream, data } = evt;
+            if (stream !== "tool")
+                return;
+            const phase = String(data.phase ?? "");
+            const toolName = String(data.name ?? "tool");
+            const meta = typeof data.meta === "string" ? data.meta : "";
+            const rawInput = data.input;
+            const input = typeof rawInput === "string" ? rawInput : "";
+            // Parse structured input for richer detail on cli_* tools
+            let inputObj = null;
+            if (rawInput && typeof rawInput === "object") {
+                inputObj = rawInput;
+            }
+            else if (input.startsWith("{")) {
+                try {
+                    inputObj = JSON.parse(input);
+                }
+                catch { }
+            }
+            // Tool execution start — emit action with tool name + available context
+            if (phase === "start") {
+                lastToolAction = toolName;
+                // cli_codex / cli_claude / cli_gemini: emit a thought + action so the
+                // user immediately sees what the agent is dispatching and why.
+                if (toolName.startsWith("cli_") && inputObj) {
+                    const tag = cliLabel(toolName);
+                    const prompt = String(inputObj.prompt ?? "").slice(0, 250);
+                    const workDir = inputObj.workingDir ? ` in ${inputObj.workingDir}` : "";
+                    emit({ type: "thought", body: `[${tag}] Starting${workDir}: "${prompt}"\n\n${toolName}\nin progress` });
+                    emit({ type: "action", action: `[${tag}] Running${workDir}`, parameter: prompt });
+                }
+                else {
+                    const detail = input || meta || toolName;
+                    emit({ type: "action", action: `Running ${toolName}`, parameter: detail.slice(0, 300) });
+                }
+            }
+            // Tool execution update — partial progress (keeps Linear UI alive for long tools)
+            if (phase === "update") {
+                const detail = meta || input || "in progress";
+                const prefix = toolName.startsWith("cli_") ? `[${cliLabel(toolName)}] ` : "";
+                emit({ type: "action", action: `${prefix}${toolName}`, parameter: detail.slice(0, 300) });
+            }
+            // Tool execution completed successfully
+            if (phase === "result" && !data.isError) {
+                const detail = meta ? meta.slice(0, 300) : "completed";
+                const prefix = toolName.startsWith("cli_") ? `[${cliLabel(toolName)}] ` : "";
+                emit({ type: "action", action: `${prefix}${toolName} done`, parameter: detail });
+            }
+            // Tool execution result with error
+            if (phase === "result" && data.isError) {
+                const prefix = toolName.startsWith("cli_") ? `[${cliLabel(toolName)}] ` : "";
+                emit({ type: "action", action: `${prefix}${toolName} failed`, parameter: (meta || "error").slice(0, 300) });
+            }
+        },
+        // Partial assistant text (for long responses)
+        onPartialReply: (payload) => {
+            watchdog.tick();
+            // We don't emit every partial chunk to avoid flooding Linear
+            // The final response will be posted as a comment
+        },
+    });
+    watchdog.stop();
+    // Extract output text from payloads
+    const payloads = result.payloads ?? [];
+    const outputText = payloads
+        .map((p) => p.text)
+        .filter(Boolean)
+        .join("\n\n");
+    // Check if watchdog killed the run
+    if (watchdog.wasKilled) {
+        const silenceSec = Math.round(watchdog.silenceMs / 1000);
+        api.logger.warn(`Embedded agent killed by watchdog: agent=${agentId} session=${sessionId} silence=${silenceSec}s`);
+        return {
+            success: false,
+            output: outputText || `Agent killed by inactivity watchdog after ${silenceSec}s of silence.`,
+            watchdogKilled: true,
+        };
+    }
+    if (result.meta?.error) {
+        api.logger.error(`Embedded agent error: ${result.meta.error.kind}: ${result.meta.error.message}`);
+        return { success: false, output: outputText || result.meta.error.message };
+    }
+    api.logger.info(`Embedded agent completed: agent=${agentId} session=${sessionId} duration=${result.meta.durationMs}ms`);
+    return { success: true, output: outputText || "(no output)" };
+}
+/**
+ * Subprocess fallback (no streaming, used when no Linear session context).
+ */
+async function runSubprocess(api, agentId, sessionId, message, timeoutMs) {
+    const command = [
+        "openclaw",
+        "agent",
+        "--agent",
+        agentId,
+        "--session-id",
+        sessionId,
+        "--message",
+        message,
+        "--timeout",
+        String(Math.floor(timeoutMs / 1000)),
+        "--json",
+    ];
+    const result = await api.runtime.system.runCommandWithTimeout(command, { timeoutMs });
+    if (result.code !== 0) {
+        const error = result.stderr || result.stdout || "no output";
+        api.logger.error(`Agent ${agentId} failed (${result.code}): ${error}`);
+        return { success: false, output: error };
+    }
+    const raw = result.stdout || "";
+    api.logger.info(`Agent ${agentId} completed for session ${sessionId}`);
+    // Extract clean text from --json output.
+    // The subprocess stdout may contain plugin init log lines before the JSON blob.
+    // Strip everything before the first `{` to isolate the JSON envelope.
+    const extracted = extractJsonFromOutput(raw);
+    if (extracted)
+        return { success: true, output: extracted };
+    return { success: true, output: raw };
+}
+/**
+ * Extract text from subprocess --json output. Handles:
+ * - Log noise before the JSON blob (plugin init lines)
+ * - Both envelope shapes: `{ payloads }` (flat) and `{ result: { payloads } }` (nested)
+ */
+function extractJsonFromOutput(raw) {
+    // The subprocess stdout may contain plugin init log lines before the JSON
+    // result blob. Try parsing the whole thing first; if that fails, scan lines
+    // backwards for a `{` that starts a valid JSON envelope with payloads.
+    const candidates = [raw];
+    // Also try from each line that starts with `{` (the JSON blob typically
+    // starts on its own line after log noise).
+    const lines = raw.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trimStart().startsWith("{")) {
+            candidates.push(lines.slice(i).join("\n"));
+        }
+    }
+    for (const candidate of candidates) {
+        try {
+            const parsed = JSON.parse(candidate);
+            // Try both envelope shapes: flat `{ payloads }` and nested `{ result: { payloads } }`
+            const payloads = parsed?.payloads ?? parsed?.result?.payloads;
+            if (Array.isArray(payloads) && payloads.length > 0) {
+                const text = payloads.map((p) => p.text).filter(Boolean).join("\n\n");
+                if (text)
+                    return text;
+            }
+        }
+        catch {
+            // Not valid JSON at this position — try next candidate
+        }
+    }
+    return null;
+}

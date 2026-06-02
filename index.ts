@@ -346,8 +346,8 @@ export default function register(api: OpenClawPluginApi) {
 
   api.logger.info("Dispatch lifecycle hooks registered: agent_end, subagent_ended, session_start, session_end, after_compaction, before_reset");
 
-  // Inject recent dispatch history as context for worker/audit agents
-  api.on("before_agent_start", async (event: any, ctx: any) => {
+  // Inject recent dispatch history as context for worker/audit agents.
+  api.on("before_prompt_build", async (_event: any, ctx: any) => {
     try {
       const sessionKey = ctx?.sessionKey ?? "";
       if (!sessionKey.startsWith("linear-worker-") && !sessionKey.startsWith("linear-audit-")) return;

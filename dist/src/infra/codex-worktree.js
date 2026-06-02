@@ -1,0 +1,361 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, statSync, readdirSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { ensureGitignore } from "../pipeline/artifacts.js";
+const DEFAULT_BASE_REPO = path.join(homedir(), "ai-workspace");
+const DEFAULT_WORKTREE_BASE_DIR = path.join(homedir(), ".openclaw", "worktrees");
+function resolveBaseDir(baseDir) {
+    if (!baseDir)
+        return DEFAULT_WORKTREE_BASE_DIR;
+    if (baseDir.startsWith("~/"))
+        return baseDir.replace("~", homedir());
+    return baseDir;
+}
+function git(args, cwd) {
+    return execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        timeout: 30_000,
+    }).trim();
+}
+function gitLong(args, cwd, timeout = 120_000) {
+    return execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        timeout,
+    }).trim();
+}
+/**
+ * Create a git worktree for isolated work on a Linear issue.
+ *
+ * Path: {baseDir}/{issueIdentifier}/ — deterministic, persistent.
+ * Branch: codex/{issueIdentifier}
+ *
+ * Idempotent: if the worktree already exists, returns it without recreating.
+ * If the branch exists but the worktree is gone, recreates the worktree from
+ * the existing branch (resume scenario).
+ */
+export function createWorktree(issueIdentifier, opts) {
+    const repo = opts?.baseRepo ?? DEFAULT_BASE_REPO;
+    const baseDir = resolveBaseDir(opts?.baseDir);
+    if (!existsSync(repo)) {
+        throw new Error(`Base repo not found: ${repo}`);
+    }
+    // Ensure base directory exists
+    if (!existsSync(baseDir)) {
+        mkdirSync(baseDir, { recursive: true });
+    }
+    const branch = `codex/${issueIdentifier}`;
+    const worktreePath = path.join(baseDir, issueIdentifier);
+    // Fetch latest from origin (best effort) — do this early so both
+    // resume and fresh paths have up-to-date refs.
+    try {
+        git(["fetch", "origin"], repo);
+    }
+    catch {
+        // Offline or no remote — continue with local state
+    }
+    // Idempotent: if worktree already exists, return it
+    if (existsSync(worktreePath)) {
+        try {
+            // Verify it's a valid git worktree
+            git(["rev-parse", "--git-dir"], worktreePath);
+            ensureGitignore(worktreePath);
+            return { path: worktreePath, branch, resumed: true };
+        }
+        catch {
+            // Directory exists but isn't a valid worktree — remove and recreate
+            try {
+                git(["worktree", "remove", "--force", worktreePath], repo);
+            }
+            catch { /* best effort */ }
+        }
+    }
+    // Check if branch already exists (resume scenario)
+    const branchExists = branchExistsInRepo(branch, repo);
+    if (branchExists) {
+        // Recreate worktree from existing branch — preserves previous work
+        git(["worktree", "add", worktreePath, branch], repo);
+        ensureGitignore(worktreePath);
+        return { path: worktreePath, branch, resumed: true };
+    }
+    // Fresh start: new branch off HEAD
+    git(["worktree", "add", "-b", branch, worktreePath], repo);
+    ensureGitignore(worktreePath);
+    return { path: worktreePath, branch, resumed: false };
+}
+/**
+ * Create worktrees for multiple repos.
+ *
+ * Layout: {baseDir}/{issueIdentifier}/{repoName}/
+ * Branch: codex/{issueIdentifier} (same branch name in each repo)
+ *
+ * Each individual repo worktree follows the same idempotent/resume logic
+ * as createWorktree: if the worktree or branch already exists, it resumes.
+ */
+export function createMultiWorktree(identifier, repos, opts) {
+    const baseDir = resolveBaseDir(opts?.baseDir);
+    const parentPath = path.join(baseDir, identifier);
+    // Ensure parent directory exists
+    if (!existsSync(parentPath)) {
+        mkdirSync(parentPath, { recursive: true });
+    }
+    const branch = `codex/${identifier}`;
+    const worktrees = [];
+    for (const repo of repos) {
+        if (!existsSync(repo.path)) {
+            throw new Error(`Repo not found: ${repo.name} at ${repo.path}`);
+        }
+        const worktreePath = path.join(parentPath, repo.name);
+        // Fetch latest from origin (best effort)
+        try {
+            git(["fetch", "origin"], repo.path);
+        }
+        catch {
+            // Offline or no remote — continue with local state
+        }
+        // Idempotent: if worktree already exists, resume it
+        if (existsSync(worktreePath)) {
+            try {
+                git(["rev-parse", "--git-dir"], worktreePath);
+                ensureGitignore(worktreePath);
+                worktrees.push({ repoName: repo.name, path: worktreePath, branch, resumed: true });
+                continue;
+            }
+            catch {
+                // Directory exists but isn't a valid worktree — remove and recreate
+                try {
+                    git(["worktree", "remove", "--force", worktreePath], repo.path);
+                }
+                catch { /* best effort */ }
+            }
+        }
+        // Check if branch already exists (resume scenario)
+        const exists = branchExistsInRepo(branch, repo.path);
+        if (exists) {
+            git(["worktree", "add", worktreePath, branch], repo.path);
+            ensureGitignore(worktreePath);
+            worktrees.push({ repoName: repo.name, path: worktreePath, branch, resumed: true });
+        }
+        else {
+            git(["worktree", "add", "-b", branch, worktreePath], repo.path);
+            ensureGitignore(worktreePath);
+            worktrees.push({ repoName: repo.name, path: worktreePath, branch, resumed: false });
+        }
+    }
+    return { parentPath, worktrees };
+}
+/**
+ * Check if a branch exists in the repo.
+ */
+function branchExistsInRepo(branch, repo) {
+    try {
+        const result = git(["branch", "--list", branch], repo);
+        return result.trim().length > 0;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Get the status of a worktree: changed files, uncommitted work, last commit.
+ */
+export function getWorktreeStatus(worktreePath) {
+    if (!existsSync(worktreePath)) {
+        return { filesChanged: [], hasUncommitted: false, lastCommit: null };
+    }
+    const diffOutput = git(["diff", "--name-only", "HEAD"], worktreePath);
+    const stagedOutput = git(["diff", "--name-only", "--cached"], worktreePath);
+    const untrackedOutput = git(["ls-files", "--others", "--exclude-standard"], worktreePath);
+    const allFiles = new Set();
+    for (const line of [...diffOutput.split("\n"), ...stagedOutput.split("\n"), ...untrackedOutput.split("\n")]) {
+        const trimmed = line.trim();
+        if (trimmed)
+            allFiles.add(trimmed);
+    }
+    const hasUncommitted = allFiles.size > 0;
+    let lastCommit = null;
+    try {
+        lastCommit = git(["log", "-1", "--oneline"], worktreePath);
+    }
+    catch {
+        // No commits yet
+    }
+    return {
+        filesChanged: [...allFiles],
+        hasUncommitted,
+        lastCommit,
+    };
+}
+/**
+ * Remove a worktree and optionally delete its branch.
+ */
+export function removeWorktree(worktreePath, opts) {
+    const repo = opts?.baseRepo ?? DEFAULT_BASE_REPO;
+    if (existsSync(worktreePath)) {
+        git(["worktree", "remove", "--force", worktreePath], repo);
+    }
+    if (opts?.deleteBranch) {
+        // Extract issue identifier from worktree path to find matching branch
+        const dirName = path.basename(worktreePath);
+        const branch = `codex/${dirName}`;
+        try {
+            git(["branch", "-D", branch], repo);
+        }
+        catch {
+            // Branch doesn't exist or already deleted
+        }
+    }
+}
+/**
+ * Push the worktree branch and create a GitHub PR via `gh`.
+ */
+export function createPullRequest(worktreePath, title, body) {
+    // Commit any uncommitted changes first
+    const status = getWorktreeStatus(worktreePath);
+    if (status.hasUncommitted) {
+        git(["add", "-A"], worktreePath);
+        git([
+            "-c", "user.name=claw",
+            "-c", "user.email=claw@calltelemetry.com",
+            "commit", "-m", title,
+        ], worktreePath);
+    }
+    // Get branch name
+    const branch = git(["rev-parse", "--abbrev-ref", "HEAD"], worktreePath);
+    // Push branch
+    git(["push", "-u", "origin", branch], worktreePath);
+    // Create PR via gh CLI
+    const prUrl = execFileSync("gh", ["pr", "create", "--title", title, "--body", body, "--head", branch], { cwd: worktreePath, encoding: "utf8", timeout: 30_000 }).trim();
+    return { prUrl };
+}
+/**
+ * List all worktrees in the configured base directory.
+ */
+export function listWorktrees(opts) {
+    const baseDir = resolveBaseDir(opts?.baseDir);
+    const entries = [];
+    if (!existsSync(baseDir))
+        return [];
+    let dirs;
+    try {
+        dirs = readdirSync(baseDir).map((d) => path.join(baseDir, d));
+    }
+    catch {
+        return [];
+    }
+    for (const dir of dirs) {
+        if (!existsSync(dir))
+            continue;
+        try {
+            const stat = statSync(dir);
+            if (!stat.isDirectory())
+                continue;
+            // Verify it's a git worktree
+            try {
+                git(["rev-parse", "--git-dir"], dir);
+            }
+            catch {
+                continue; // Not a git worktree
+            }
+            let branch = "unknown";
+            try {
+                branch = git(["rev-parse", "--abbrev-ref", "HEAD"], dir);
+            }
+            catch { }
+            let hasChanges = false;
+            try {
+                const status = getWorktreeStatus(dir);
+                hasChanges = status.hasUncommitted;
+            }
+            catch { }
+            entries.push({
+                path: dir,
+                branch,
+                issueIdentifier: path.basename(dir),
+                ageMs: Date.now() - stat.mtimeMs,
+                hasChanges,
+            });
+        }
+        catch {
+            // Skip unreadable dirs
+        }
+    }
+    return entries.sort((a, b) => b.ageMs - a.ageMs);
+}
+/**
+ * Prepare a worktree for a code run:
+ *   1. Pull latest from origin for the issue branch (fast-forward only)
+ *   2. Initialize and update all git submodules recursively
+ *
+ * Safe to call on every run — idempotent. Failures are non-fatal;
+ * the code run proceeds even if pull or submodule init fails.
+ */
+export function prepareWorkspace(worktreePath, branch) {
+    const errors = [];
+    let pulled = false;
+    let pullOutput;
+    let submodulesInitialized = false;
+    let submoduleOutput;
+    // 1. Pull latest from origin (ff-only to avoid merge conflicts)
+    try {
+        // Check if remote branch exists before pulling
+        const remoteBranch = `origin/${branch}`;
+        try {
+            git(["rev-parse", "--verify", remoteBranch], worktreePath);
+            // Remote branch exists — pull latest
+            pullOutput = git(["pull", "--ff-only", "origin", branch], worktreePath);
+            pulled = true;
+        }
+        catch {
+            // Remote branch doesn't exist yet (fresh issue branch) — nothing to pull
+            pullOutput = "remote branch not found, skipping pull";
+        }
+    }
+    catch (err) {
+        const msg = `pull failed: ${err}`;
+        errors.push(msg);
+        pullOutput = msg;
+    }
+    // 2. Initialize and update all submodules recursively
+    try {
+        submoduleOutput = gitLong(["submodule", "update", "--init", "--recursive"], worktreePath, 120_000);
+        submodulesInitialized = true;
+    }
+    catch (err) {
+        const msg = `submodule init failed: ${err}`;
+        errors.push(msg);
+        submoduleOutput = msg;
+    }
+    return { pulled, pullOutput, submodulesInitialized, submoduleOutput, errors };
+}
+/**
+ * Remove worktrees older than maxAgeMs.
+ * Returns list of removed paths.
+ */
+export function pruneStaleWorktrees(maxAgeMs = 24 * 60 * 60_000, opts) {
+    const worktrees = listWorktrees(opts);
+    const repo = opts?.baseRepo ?? DEFAULT_BASE_REPO;
+    const removed = [];
+    const skipped = [];
+    const errors = [];
+    for (const wt of worktrees) {
+        if (wt.ageMs < maxAgeMs) {
+            skipped.push(wt.path);
+            continue;
+        }
+        if (opts?.dryRun) {
+            removed.push(wt.path);
+            continue;
+        }
+        try {
+            removeWorktree(wt.path, { deleteBranch: true, baseRepo: repo });
+            removed.push(wt.path);
+        }
+        catch (err) {
+            errors.push(`${wt.path}: ${err}`);
+        }
+    }
+    return { removed, skipped, errors };
+}

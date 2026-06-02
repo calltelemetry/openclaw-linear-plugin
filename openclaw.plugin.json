@@ -3,6 +3,28 @@
   "name": "Linear Agent",
   "description": "Linear integration with OAuth support, agent pipeline, and webhook-driven AI agent lifecycle",
   "version": "0.9.24",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "cli_codex",
+      "cli_claude",
+      "cli_gemini",
+      "spawn_agent",
+      "ask_agent",
+      "linear_issues",
+      "steer_agent",
+      "capture_agent_output",
+      "abort_agent",
+      "plan_create_issue",
+      "plan_link_issues",
+      "plan_get_project",
+      "plan_update_issue",
+      "plan_audit",
+      "dispatch_history"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -15,6 +37,9 @@
       "defaultAgentId": { "type": "string", "description": "OpenClaw agent ID to use for pipeline stages" },
       "enableAudit": { "type": "boolean", "description": "Run auditor stage after implementation", "default": true },
       "codexBaseRepo": { "type": "string", "description": "Path to git repo for Codex worktrees", "default": "/home/claw/ai-workspace" },
+      "codexBin": { "type": "string", "description": "Path to the Codex CLI binary used by codex_run diagnostics and tools" },
+      "claudeBin": { "type": "string", "description": "Path to the Claude CLI binary used by claude_run diagnostics and tools" },
+      "geminiBin": { "type": "string", "description": "Path to the Gemini CLI binary used by gemini_run diagnostics and tools" },
       "enableOrchestration": { "type": "boolean", "description": "Allow agents to spawn sub-agents via spawn_agent/ask_agent tools", "default": true },
       "worktreeBaseDir": { "type": "string", "description": "Base directory for persistent git worktrees (default: ~/.openclaw/worktrees)" },
       "repos": {
