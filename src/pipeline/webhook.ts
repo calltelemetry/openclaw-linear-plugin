@@ -423,7 +423,10 @@ export async function handleLinearWebhook(
         mentionPattern.lastIndex = 0;
         const mentionMatch = text.match(mentionPattern);
         if (mentionMatch) {
-          const alias = mentionMatch[1];
+          // buildMentionPattern is global, so String#match returns full matches
+          // rather than capture groups. Use the first full mention consistently
+          // with both global and non-global patterns.
+          const alias = mentionMatch[0]?.replace(/^@/, "");
           const resolved = resolveAgentFromAlias(alias, profiles);
           if (resolved) {
             api.logger.info(`AgentSession routed to ${resolved.agentId} via @${alias} mention in ${text === userMessage ? "comment" : text === sessionPrompt ? "session prompt" : "promptContext"}`);
@@ -764,7 +767,8 @@ export async function handleLinearWebhook(
     if (promptedMentionPattern && userMessage) {
       const mentionMatch = userMessage.match(promptedMentionPattern);
       if (mentionMatch) {
-        const alias = mentionMatch[1];
+        // A global mention regex returns full matches only, not capture groups.
+        const alias = mentionMatch[0]?.replace(/^@/, "");
         const resolved = resolveAgentFromAlias(alias, promptedProfiles);
         if (resolved) {
           api.logger.info(`AgentSession prompted: routed to ${resolved.agentId} via @${alias} mention`);

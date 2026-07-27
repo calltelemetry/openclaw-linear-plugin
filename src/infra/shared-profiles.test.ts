@@ -234,6 +234,10 @@ describe("resolveAgentFromAlias", () => {
     const result = resolveAgentFromAlias("anything", {});
     expect(result).toBeNull();
   });
+
+  it.each([undefined, null, ""])("contains malformed or missing aliases without throwing", (alias) => {
+    expect(resolveAgentFromAlias(alias, loadAgentProfiles())).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

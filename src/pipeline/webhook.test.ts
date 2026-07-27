@@ -804,6 +804,9 @@ describe("AgentSessionEvent.created full flow", () => {
   });
 
   it("routes to mentioned agent when @mention is present", async () => {
+    // Match the production pattern: /g makes String#match return full matches,
+    // not capture groups.
+    buildMentionPatternMock.mockReturnValue(/@(mal|mason|kaylee|eureka)/gi);
     resolveAgentFromAliasMock.mockReturnValue({ agentId: "kaylee", profile: { label: "Kaylee" } });
 
     const result = await postWebhook({
@@ -820,6 +823,7 @@ describe("AgentSessionEvent.created full flow", () => {
 
     expect(result.status).toBe(200);
     await new Promise((r) => setTimeout(r, 50));
+    expect(resolveAgentFromAliasMock).toHaveBeenCalledWith("kaylee", expect.any(Object));
     const infoCalls = (result.api.logger.info as any).mock.calls.map((c: any[]) => c[0]);
     expect(infoCalls.some((msg: string) => msg.includes("routed to kaylee"))).toBe(true);
   });
@@ -1048,6 +1052,8 @@ describe("AgentSessionEvent.prompted full flow", () => {
   });
 
   it("routes to mentioned agent in prompted follow-up", async () => {
+    // AgentSession.prompted uses the same global pattern as production.
+    buildMentionPatternMock.mockReturnValue(/@(mal|mason|kaylee|eureka)/gi);
     resolveAgentFromAliasMock.mockReturnValue({ agentId: "kaylee", profile: { label: "Kaylee" } });
 
     const result = await postWebhook({
@@ -1063,6 +1069,7 @@ describe("AgentSessionEvent.prompted full flow", () => {
 
     expect(result.status).toBe(200);
     await new Promise((r) => setTimeout(r, 50));
+    expect(resolveAgentFromAliasMock).toHaveBeenCalledWith("kaylee", expect.any(Object));
     const infoCalls = (result.api.logger.info as any).mock.calls.map((c: any[]) => c[0]);
     expect(infoCalls.some((msg: string) => msg.includes("routed to kaylee"))).toBe(true);
   });
