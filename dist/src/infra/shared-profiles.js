@@ -54,6 +54,8 @@ export function buildMentionPattern(profiles) {
  * belongs to. Returns { agentId, label } or null if no match.
  */
 export function resolveAgentFromAlias(alias, profiles) {
+    if (typeof alias !== "string" || alias.length === 0)
+        return null;
     const lower = alias.toLowerCase();
     for (const [agentId, profile] of Object.entries(profiles)) {
         if (profile.mentionAliases.some(a => a.toLowerCase() === lower)) {
