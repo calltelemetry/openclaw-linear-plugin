@@ -1950,6 +1950,32 @@ async function handleCloseIssue(
     }
 
     const fullReport = `## Closure Report\n\n${closureReport}`;
+    const agentOpts = avatarUrl
+      ? { createAsUser: label, displayIconUrl: avatarUrl }
+      : undefined;
+
+    // Deliver the closure report before completing, so issue state cannot
+    // outrun the evidence that justifies it.
+    try {
+      if (agentSessionId) {
+        const labeledReport = `**[${label}]** ${fullReport}`;
+        const emitted = await linearApi.emitActivity(agentSessionId, {
+          type: "response",
+          body: labeledReport,
+        }).then(() => true).catch(() => false);
+
+        if (!emitted) {
+          await postAgentComment(api, linearApi, issue.id, fullReport, label, agentOpts);
+        }
+      } else {
+        await postAgentComment(api, linearApi, issue.id, fullReport, label, agentOpts);
+      }
+    } catch (err) {
+      api.logger.error(`Failed to deliver closure report for ${issueRef}; issue remains open: ${err}`);
+      return;
+    }
+
+    api.logger.info(`Posted closure report for ${issueRef}`);
 
     // Transition issue to completed state
     if (completedStateId) {
@@ -1960,31 +1986,8 @@ async function handleCloseIssue(
         api.logger.error(`Failed to transition issue ${issueRef} to completed: ${err}`);
       }
     } else {
-      api.logger.warn(`No completed state found for ${issueRef} — posting report without state change`);
+      api.logger.warn(`No completed state found for ${issueRef} — posted report without state change`);
     }
-
-    // Post closure report via emitActivity-first pattern
-    if (agentSessionId) {
-      const labeledReport = `**[${label}]** ${fullReport}`;
-      const emitted = await linearApi.emitActivity(agentSessionId, {
-        type: "response",
-        body: labeledReport,
-      }).then(() => true).catch(() => false);
-
-      if (!emitted) {
-        const agentOpts = avatarUrl
-          ? { createAsUser: label, displayIconUrl: avatarUrl }
-          : undefined;
-        await postAgentComment(api, linearApi, issue.id, fullReport, label, agentOpts);
-      }
-    } else {
-      const agentOpts = avatarUrl
-        ? { createAsUser: label, displayIconUrl: avatarUrl }
-        : undefined;
-      await postAgentComment(api, linearApi, issue.id, fullReport, label, agentOpts);
-    }
-
-    api.logger.info(`Posted closure report for ${issueRef}`);
   } catch (err) {
     api.logger.error(`handleCloseIssue error: ${err}`);
     if (agentSessionId) {

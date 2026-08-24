@@ -2343,6 +2343,48 @@ describe("handleCloseIssue via close_issue intent", () => {
     expect(mockLinearApiInstance.updateIssue).toHaveBeenCalledTimes(1);
   });
 
+  it("does not complete the issue when the closure report cannot be delivered", async () => {
+    classifyIntentMock.mockResolvedValue({
+      intent: "close_issue",
+      reasoning: "User wants to close",
+      fromFallback: false,
+    });
+    mockLinearApiInstance.getIssueDetails.mockResolvedValue({
+      id: "issue-close-undeliverable",
+      identifier: "ENG-CUD",
+      title: "Close Undeliverable",
+      description: "desc",
+      state: { name: "In Progress", type: "started" },
+      team: { id: "team-cud" },
+      comments: { nodes: [] },
+    });
+    mockLinearApiInstance.getTeamStates.mockResolvedValue([
+      { id: "st-done-cud", name: "Done", type: "completed" },
+    ]);
+    runAgentMock.mockResolvedValue({ success: true, output: "## Summary\nAll good." });
+    mockLinearApiInstance.emitActivity.mockImplementation((_sid: string, content: any) => {
+      if (content.type === "response") return Promise.reject(new Error("activity unavailable"));
+      return Promise.resolve(undefined);
+    });
+    mockLinearApiInstance.createComment.mockRejectedValue(new Error("comment API down"));
+
+    const result = await postWebhook({
+      type: "Comment",
+      action: "create",
+      data: {
+        id: "comment-close-undeliverable",
+        body: "Close this",
+        user: { id: "human-cud", name: "Human" },
+        issue: { id: "issue-close-undeliverable", identifier: "ENG-CUD" },
+      },
+    });
+
+    expect(result.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(mockLinearApiInstance.updateIssue).not.toHaveBeenCalled();
+  });
+
   it("posts closure report without state change when no completed state found", async () => {
     classifyIntentMock.mockResolvedValue({
       intent: "close_issue",
