@@ -2340,6 +2340,7 @@ describe("handleCloseIssue via close_issue intent", () => {
       "issue-close-full",
       expect.objectContaining({ stateId: "st-done" }),
     );
+    expect(mockLinearApiInstance.updateIssue).toHaveBeenCalledTimes(1);
   });
 
   it("posts closure report without state change when no completed state found", async () => {
@@ -2385,7 +2386,7 @@ describe("handleCloseIssue via close_issue intent", () => {
     expect(warnCalls.some((msg: string) => msg.includes("No completed state found"))).toBe(true);
   });
 
-  it("handles close agent failure gracefully", async () => {
+  it("leaves the issue open when closure report generation fails", async () => {
     classifyIntentMock.mockResolvedValue({
       intent: "close_issue",
       reasoning: "User wants to close",
@@ -2415,11 +2416,46 @@ describe("handleCloseIssue via close_issue intent", () => {
 
     expect(result.status).toBe(200);
     await new Promise((r) => setTimeout(r, 300));
-    // Should still post a closure report (with fallback text)
+
+    expect(mockLinearApiInstance.updateIssue).not.toHaveBeenCalled();
     const emitCalls = mockLinearApiInstance.emitActivity.mock.calls;
-    const hasResponse = emitCalls.some((c: any[]) => c[1]?.type === "response");
-    const hasComment = mockLinearApiInstance.createComment.mock.calls.length > 0;
-    expect(hasResponse || hasComment).toBe(true);
+    expect(emitCalls.some((c: any[]) => c[1]?.type === "error")).toBe(true);
+  });
+
+  it("leaves the issue open when closure report output is blank", async () => {
+    classifyIntentMock.mockResolvedValue({
+      intent: "close_issue",
+      reasoning: "User wants to close",
+      fromFallback: false,
+    });
+    mockLinearApiInstance.getIssueDetails.mockResolvedValue({
+      id: "issue-close-empty",
+      identifier: "ENG-CLE",
+      title: "Close Empty",
+      description: "desc",
+      state: { name: "In Progress", type: "started" },
+      team: { id: "team-cle" },
+      comments: { nodes: [] },
+    });
+    runAgentMock.mockResolvedValue({ success: true, output: " \n\t " });
+
+    const result = await postWebhook({
+      type: "Comment",
+      action: "create",
+      data: {
+        id: "comment-close-empty",
+        body: "Close this",
+        user: { id: "human-cle", name: "Human" },
+        issue: { id: "issue-close-empty", identifier: "ENG-CLE" },
+      },
+    });
+
+    expect(result.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(mockLinearApiInstance.updateIssue).not.toHaveBeenCalled();
+    const emitCalls = mockLinearApiInstance.emitActivity.mock.calls;
+    expect(emitCalls.some((c: any[]) => c[1]?.type === "error")).toBe(true);
   });
 });
 

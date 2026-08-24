@@ -1920,13 +1920,27 @@ async function handleCloseIssue(
       readOnly: true,
     });
 
-    if (!result.success) {
-      api.logger.error(`Closure report agent failed for ${issueRef}: ${(result.output ?? "no output").slice(0, 500)}`);
-    }
+    const closureReport = result.output?.trim();
+    if (!result.success || !closureReport) {
+      const detail = result.success
+        ? "agent returned empty output"
+        : `agent failed: ${(result.output ?? "no output").slice(0, 200)}`;
+      const failureMessage = `Closure report generation failed for ${issueRef}; issue remains open (${detail}).`;
+      api.logger.error(failureMessage);
 
-    const closureReport = result.success
-      ? result.output
-      : `Issue closed by ${commentor}.\n\n> ${commentBody}\n\n*Closure report generation failed — agent returned: ${(result.output ?? "no output").slice(0, 200)}*`;
+      if (agentSessionId) {
+        await linearApi.emitActivity(agentSessionId, {
+          type: "error",
+          body: failureMessage,
+        }).catch(() => {});
+      } else {
+        const agentOpts = avatarUrl
+          ? { createAsUser: label, displayIconUrl: avatarUrl }
+          : undefined;
+        await postAgentComment(api, linearApi, issue.id, failureMessage, label, agentOpts);
+      }
+      return;
+    }
 
     const fullReport = `## Closure Report\n\n${closureReport}`;
 
