@@ -2361,6 +2361,13 @@ describe("handleCloseIssue via close_issue intent", () => {
     mockLinearApiInstance.getTeamStates.mockResolvedValue([
       { id: "st-done-embedded", name: "Done", type: "completed" },
     ]);
+    let resolveUpdate!: (call: [string, { stateId: string }]) => void;
+    const updateCall = new Promise<[string, { stateId: string }]>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    mockLinearApiInstance.updateIssue.mockImplementationOnce(async (issueId: string, input: { stateId: string }) => {
+      resolveUpdate([issueId, input]);
+    });
     runAgentMock.mockImplementation(async (options: any) => {
       if (!options.readOnly || options.streaming?.agentSessionId !== "sess-new") {
         return { success: false, output: "Read-only agent run requires the embedded runner." };
@@ -2380,12 +2387,9 @@ describe("handleCloseIssue via close_issue intent", () => {
     });
 
     expect(result.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 300));
+    const completedIssue = await updateCall;
 
-    expect(mockLinearApiInstance.updateIssue).toHaveBeenCalledWith(
-      "issue-close-embedded",
-      { stateId: "st-done-embedded" },
-    );
+    expect(completedIssue).toEqual(["issue-close-embedded", { stateId: "st-done-embedded" }]);
   });
 
   it("does not complete the issue when the closure report cannot be delivered", async () => {
