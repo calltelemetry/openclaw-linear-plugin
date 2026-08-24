@@ -23,4 +23,10 @@ jobs:
 
       - run: npm install --ignore-scripts
 
-      - run: npm publish --provenance --access public
+      - name: Publish release
+        if: github.event_name == 'release'
+        run: npm publish --provenance --access public
+
+      - name: Diagnose OIDC exchange
+        if: github.event_name == 'workflow_dispatch'
+        run: npm publish --dry-run --loglevel verbose
