@@ -434,6 +434,16 @@ describe("LinearAgentApi", () => {
         api.emitActivity("session-1", { type: "response", body: "Closure report" }),
       ).rejects.toThrow("Linear agent activity creation failed");
     });
+
+    it("rejects with the activity error when GraphQL returns null data", async () => {
+      fetchMock.mockResolvedValueOnce(okResponse(null));
+
+      const api = new LinearAgentApi(TOKEN);
+
+      await expect(
+        api.emitActivity("session-1", { type: "response", body: "Closure report" }),
+      ).rejects.toThrow("Linear agent activity creation failed");
+    });
   });
 
   describe("createComment", () => {

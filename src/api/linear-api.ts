@@ -227,7 +227,7 @@ export class LinearAgentApi {
       { input: { agentSessionId, content } },
     );
 
-    if (data.agentActivityCreate?.success !== true) {
+    if (data?.agentActivityCreate?.success !== true) {
       throw new Error("Linear agent activity creation failed");
     }
   }
