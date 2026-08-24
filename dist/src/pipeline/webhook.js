@@ -1680,6 +1680,7 @@ async function handleCloseIssue(api, linearApi, profiles, agentId, issue, commen
             sessionId: `linear-close-${agentId}-${Date.now()}`,
             message,
             timeoutMs: 2 * 60_000,
+            streaming: agentSessionId ? { linearApi, agentSessionId } : undefined,
             readOnly: true,
         });
         const closureReport = result.output?.trim();
