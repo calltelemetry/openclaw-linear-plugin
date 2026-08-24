@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerLinearProvider } from "./src/api/auth.js";
 import { registerCli } from "./src/infra/cli.js";
 import { createLinearTools } from "./src/tools/tools.js";
@@ -65,7 +66,7 @@ function extractCompletionOutput(event: any): string {
   return assistantBlocks.join("\n");
 }
 
-export default function register(api: OpenClawPluginApi) {
+function register(api: OpenClawPluginApi) {
   const pluginConfig = api.pluginConfig;
 
   // Check token availability (config → env → auth profile store)
@@ -487,3 +488,10 @@ export default function register(api: OpenClawPluginApi) {
   // Clean up timer on process exit
   process.on("beforeExit", () => stopTokenRefreshTimer());
 }
+
+export default definePluginEntry({
+  id: "openclaw-linear",
+  name: "Linear Agent",
+  description: "Linear integration with OAuth support, agent pipeline, and webhook-driven AI agent lifecycle",
+  register,
+});

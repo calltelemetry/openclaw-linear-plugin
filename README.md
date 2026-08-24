@@ -7,7 +7,7 @@
 [![CI](https://github.com/calltelemetry/openclaw-linear-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/calltelemetry/openclaw-linear-plugin/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/calltelemetry/openclaw-linear-plugin/graph/badge.svg)](https://codecov.io/gh/calltelemetry/openclaw-linear-plugin)
 [![npm](https://img.shields.io/npm/v/@calltelemetry/openclaw-linear)](https://www.npmjs.com/package/@calltelemetry/openclaw-linear)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.5.9--beta.1-blue)](https://github.com/openclaw/openclaw/releases/tag/v2026.5.9-beta.1)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.7.1--2-blue)](https://github.com/openclaw/openclaw/releases/tag/v2026.7.1-2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Connect Linear to AI agents. Issues get triaged, implemented, and audited — automatically.
