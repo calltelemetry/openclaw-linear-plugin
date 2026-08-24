@@ -216,7 +216,9 @@ export class LinearAgentApi {
   }
 
   async emitActivity(agentSessionId: string, content: ActivityContent): Promise<void> {
-    await this.gql(
+    const data = await this.gql<{
+      agentActivityCreate: { success: boolean } | null;
+    }>(
       `mutation AgentActivityCreate($input: AgentActivityCreateInput!) {
         agentActivityCreate(input: $input) {
           success
@@ -224,6 +226,10 @@ export class LinearAgentApi {
       }`,
       { input: { agentSessionId, content } },
     );
+
+    if (data.agentActivityCreate?.success !== true) {
+      throw new Error("Linear agent activity creation failed");
+    }
   }
 
   async updateSession(

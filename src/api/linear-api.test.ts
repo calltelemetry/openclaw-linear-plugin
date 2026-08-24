@@ -62,6 +62,17 @@ function gqlErrorResponse(errors: Array<{ message: string }>): Response {
   } as unknown as Response;
 }
 
+/** Build a response containing partial GraphQL data and errors. */
+function partialGqlResponse(data: unknown, errors: Array<{ message: string }>): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ data, errors }),
+    text: () => Promise.resolve(JSON.stringify({ data, errors })),
+    headers: new Headers(),
+  } as unknown as Response;
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -395,6 +406,33 @@ describe("LinearAgentApi", () => {
         agentSessionId: "session-1",
         content: { type: "thought", body: "thinking..." },
       });
+    });
+
+    it("rejects when Linear reports that the activity was not created", async () => {
+      fetchMock.mockResolvedValueOnce(
+        okResponse({ agentActivityCreate: { success: false } }),
+      );
+
+      const api = new LinearAgentApi(TOKEN);
+
+      await expect(
+        api.emitActivity("session-1", { type: "response", body: "Closure report" }),
+      ).rejects.toThrow("Linear agent activity creation failed");
+    });
+
+    it("rejects when a partial GraphQL response omits the created activity", async () => {
+      fetchMock.mockResolvedValueOnce(
+        partialGqlResponse(
+          { agentActivityCreate: null },
+          [{ message: "Activity delivery failed" }],
+        ),
+      );
+
+      const api = new LinearAgentApi(TOKEN);
+
+      await expect(
+        api.emitActivity("session-1", { type: "response", body: "Closure report" }),
+      ).rejects.toThrow("Linear agent activity creation failed");
     });
   });
 

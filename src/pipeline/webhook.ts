@@ -1917,6 +1917,7 @@ async function handleCloseIssue(
       sessionId: `linear-close-${agentId}-${Date.now()}`,
       message,
       timeoutMs: 2 * 60_000,
+      streaming: agentSessionId ? { linearApi, agentSessionId } : undefined,
       readOnly: true,
     });
 

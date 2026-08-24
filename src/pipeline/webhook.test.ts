@@ -2343,6 +2343,51 @@ describe("handleCloseIssue via close_issue intent", () => {
     expect(mockLinearApiInstance.updateIssue).toHaveBeenCalledTimes(1);
   });
 
+  it("runs closure report generation through the embedded read-only session", async () => {
+    classifyIntentMock.mockResolvedValue({
+      intent: "close_issue",
+      reasoning: "User wants to close",
+      fromFallback: false,
+    });
+    mockLinearApiInstance.getIssueDetails.mockResolvedValue({
+      id: "issue-close-embedded",
+      identifier: "ENG-CE",
+      title: "Close Embedded Test",
+      description: "desc",
+      state: { name: "In Progress", type: "started" },
+      team: { id: "team-ce" },
+      comments: { nodes: [] },
+    });
+    mockLinearApiInstance.getTeamStates.mockResolvedValue([
+      { id: "st-done-embedded", name: "Done", type: "completed" },
+    ]);
+    runAgentMock.mockImplementation(async (options: any) => {
+      if (!options.readOnly || options.streaming?.agentSessionId !== "sess-new") {
+        return { success: false, output: "Read-only agent run requires the embedded runner." };
+      }
+      return { success: true, output: "## Summary\nCompleted through the embedded runner." };
+    });
+
+    const result = await postWebhook({
+      type: "Comment",
+      action: "create",
+      data: {
+        id: "comment-close-embedded",
+        body: "Close this",
+        user: { id: "human-ce", name: "Human" },
+        issue: { id: "issue-close-embedded", identifier: "ENG-CE" },
+      },
+    });
+
+    expect(result.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(mockLinearApiInstance.updateIssue).toHaveBeenCalledWith(
+      "issue-close-embedded",
+      { stateId: "st-done-embedded" },
+    );
+  });
+
   it("does not complete the issue when the closure report cannot be delivered", async () => {
     classifyIntentMock.mockResolvedValue({
       intent: "close_issue",
