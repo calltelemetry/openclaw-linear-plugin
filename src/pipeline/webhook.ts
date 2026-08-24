@@ -1929,10 +1929,17 @@ async function handleCloseIssue(
       api.logger.error(failureMessage);
 
       if (agentSessionId) {
-        await linearApi.emitActivity(agentSessionId, {
+        const emitted = await linearApi.emitActivity(agentSessionId, {
           type: "error",
           body: failureMessage,
-        }).catch(() => {});
+        }).then(() => true).catch(() => false);
+
+        if (!emitted) {
+          const agentOpts = avatarUrl
+            ? { createAsUser: label, displayIconUrl: avatarUrl }
+            : undefined;
+          await postAgentComment(api, linearApi, issue.id, failureMessage, label, agentOpts);
+        }
       } else {
         const agentOpts = avatarUrl
           ? { createAsUser: label, displayIconUrl: avatarUrl }
