@@ -29,4 +29,6 @@ jobs:
 
       - name: Diagnose OIDC exchange
         if: github.event_name == 'workflow_dispatch'
-        run: npm publish --dry-run --loglevel verbose
+        run: |
+          node -e 'console.log({ githubActions: process.env.GITHUB_ACTIONS === "true", hasOidcRequestUrl: Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL), hasOidcRequestToken: Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) })'
+          npm publish --dry-run --loglevel silly
