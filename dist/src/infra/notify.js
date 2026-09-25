@@ -7,7 +7,7 @@
  *   1. **In-process** — calls `deliverOutboundPayloads` from the gateway's
  *      bundled outbound runtime. Fast (no subprocess), supports Telegram
  *      HTML and Discord channelData embeds. Resolved lazily at first call by
- *      scanning `openclaw/dist/deliver-*.js` for the matching export, since
+ *      scanning `openclaw/dist/deliver-*.{js,mjs}` for the matching export, since
  *      the bundle file name carries a build-time hash and is not in
  *      package.json `exports`.
  *
@@ -135,6 +135,14 @@ export function _resetDeliverResolver(forceResult) {
         _deliverModulePromise = Promise.resolve(forceResult);
     }
 }
+/**
+ * Whether a file in `openclaw/dist/` is a candidate outbound-deliver chunk.
+ * Bundled chunks shipped as `.js` through openclaw 2026.7 and as `.mjs`
+ * from 2026.9.
+ */
+export function isDeliverChunkFile(fileName) {
+    return /^deliver-[A-Za-z0-9_-]+\.m?js$/.test(fileName);
+}
 async function resolveInProcessDeliver() {
     if (_deliverModulePromise)
         return _deliverModulePromise;
@@ -144,7 +152,7 @@ async function resolveInProcessDeliver() {
             const mainEntry = _require.resolve("openclaw");
             const distDir = dirname(mainEntry);
             const files = await readdir(distDir);
-            const candidates = files.filter((f) => /^deliver-[A-Za-z0-9_-]+\.js$/.test(f));
+            const candidates = files.filter(isDeliverChunkFile);
             for (const file of candidates) {
                 try {
                     const url = pathToFileURL(join(distDir, file)).href;
@@ -200,7 +208,7 @@ export async function sendToTarget(target, message, runtime) {
     const mod = await resolveInProcessDeliver();
     if (mod) {
         try {
-            const cfg = await runtime.config.loadConfig();
+            const cfg = runtime.config.current();
             await mod.deliverOutboundPayloads({
                 cfg,
                 channel: ch,

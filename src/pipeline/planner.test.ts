@@ -15,7 +15,7 @@ vi.mock("../agent/agent.js", () => ({
 
 vi.mock("../api/linear-api.js", () => ({}));
 
-vi.mock("openclaw/plugin-sdk", () => ({}));
+vi.mock("openclaw/plugin-sdk/core", () => ({}));
 
 vi.mock("./pipeline.js", () => ({
   loadRawPromptYaml: loadRawPromptYamlMock,

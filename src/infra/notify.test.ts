@@ -20,6 +20,7 @@ import {
   sendToTarget,
   parseNotificationsConfig,
   _resetDeliverResolver,
+  isDeliverChunkFile,
   type NotifyKind,
   type NotifyPayload,
   type NotifyTarget,
@@ -140,7 +141,7 @@ describe("sendToTarget", () => {
   function mockRuntime(): any {
     return {
       config: {
-        loadConfig: vi.fn(async () => ({ /* test cfg */ })),
+        current: vi.fn(() => ({ /* test cfg */ })),
       },
     };
   }
@@ -237,7 +238,7 @@ describe("parseNotificationsConfig", () => {
 
 describe("createNotifierFromConfig", () => {
   function mockRuntime(): any {
-    return { config: { loadConfig: vi.fn(async () => ({})) } };
+    return { config: { current: vi.fn(() => ({})) } };
   }
 
   const basePayload: NotifyPayload = {
@@ -472,7 +473,7 @@ describe("formatRichMessage", () => {
 
 describe("sendToTarget (RichMessage)", () => {
   function mockRuntime(): any {
-    return { config: { loadConfig: vi.fn(async () => ({})) } };
+    return { config: { current: vi.fn(() => ({})) } };
   }
 
   afterEach(() => { mockExec.mockClear(); vi.restoreAllMocks(); });
@@ -591,7 +592,7 @@ describe("sendToTarget (RichMessage)", () => {
 
 describe("createNotifierFromConfig (richFormat)", () => {
   function mockRuntime(): any {
-    return { config: { loadConfig: vi.fn(async () => ({})) } };
+    return { config: { current: vi.fn(() => ({})) } };
   }
 
   afterEach(() => { mockExec.mockClear(); vi.restoreAllMocks(); });
@@ -626,6 +627,25 @@ describe("createNotifierFromConfig (richFormat)", () => {
 // ---------------------------------------------------------------------------
 // createNoopNotifier
 // ---------------------------------------------------------------------------
+
+describe("isDeliverChunkFile", () => {
+  it("matches .js deliver chunks (openclaw <= 2026.7)", () => {
+    expect(isDeliverChunkFile("deliver-BdKtkX_b.js")).toBe(true);
+    expect(isDeliverChunkFile("deliver-runtime-zJjOlGaa.js")).toBe(true);
+  });
+
+  it("matches .mjs deliver chunks (openclaw >= 2026.9)", () => {
+    expect(isDeliverChunkFile("deliver-B-1QqqB7.mjs")).toBe(true);
+    expect(isDeliverChunkFile("deliver-runtime-B54nppZZ.mjs")).toBe(true);
+  });
+
+  it("rejects non-deliver and non-module files", () => {
+    expect(isDeliverChunkFile("deliver-B-1QqqB7.d.mts")).toBe(false);
+    expect(isDeliverChunkFile("deliver-B-1QqqB7.mjs.map")).toBe(false);
+    expect(isDeliverChunkFile("delivery-queue-runtime-vCRB40Au.mjs")).toBe(false);
+    expect(isDeliverChunkFile("send-BS1gKiop.mjs")).toBe(false);
+  });
+});
 
 describe("createNoopNotifier", () => {
   it("returns function that resolves without error", async () => {

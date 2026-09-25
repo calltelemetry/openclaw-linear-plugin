@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync } from "node:fs";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
 import { InactivityWatchdog, resolveWatchdogConfig } from "./watchdog.js";
 
@@ -201,7 +201,11 @@ async function runEmbedded(
   toolsDeny?: string[],
 ): Promise<AgentRunResult> {
   // Load config so we can resolve agent dirs and providers correctly.
-  const origConfig = await api.runtime.config.loadConfig();
+  // current() returns the same process snapshot the removed loadConfig()
+  // returned, typed DeepReadonly. It is never mutated here: every edit below
+  // happens on a JSON clone, so dropping the readonly modifier to hand it to
+  // runEmbeddedAgent (which takes OpenClawConfig) is safe.
+  const origConfig = api.runtime.config.current() as OpenClawConfig;
   let config = origConfig;
   let configAny = config as Record<string, any>;
 
@@ -282,7 +286,7 @@ async function runEmbedded(
 
   watchdog.start();
 
-  const result = await api.runtime.agent.runEmbeddedPiAgent({
+  const result = await api.runtime.agent.runEmbeddedAgent({
     sessionId,
     sessionFile,
     workspaceDir,

@@ -8,7 +8,7 @@
  * before/after calling runAgent(). Tools read from this module-level context
  * at execution time (same pattern as active-session.ts).
  */
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import type { LinearAgentApi } from "../api/linear-api.js";
 

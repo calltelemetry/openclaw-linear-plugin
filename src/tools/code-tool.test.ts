@@ -21,7 +21,7 @@ vi.mock("../pipeline/active-session.js", () => ({
   _configureAffinityTtl: vi.fn(),
   _resetAffinityForTesting: vi.fn(),
 }));
-vi.mock("openclaw/plugin-sdk", () => ({
+vi.mock("openclaw/plugin-sdk/core", () => ({
   jsonResult: vi.fn((v: unknown) => v),
 }));
 

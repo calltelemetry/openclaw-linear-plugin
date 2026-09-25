@@ -2,7 +2,7 @@ import type {
   OpenClawPluginApi, 
   ProviderAuthContext, 
   ProviderAuthResult
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 
 export const LINEAR_OAUTH_AUTH_URL = "https://linear.app/oauth/authorize";
 export const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token";

@@ -141,7 +141,7 @@ export function recordPhaseTask(api, dispatch, phase, agentId, childSessionKey) 
         flow.runTask({
             flowId: dispatch.taskFlowId,
             // `runtime: "subagent"` is the closest valid TaskRuntime value for
-            // our embedded-agent-via-runEmbeddedPiAgent path. The runtime's
+            // our embedded-agent-via-runEmbeddedAgent path. The runtime's
             // auto-settlement (subagent-registry → completeTaskRunByRunId) keys
             // off `(runtime, runId, childSessionKey)`. We don't currently
             // register with subagent-registry, so per-task auto-settlement won't

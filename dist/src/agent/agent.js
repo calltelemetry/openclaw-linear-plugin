@@ -124,7 +124,11 @@ const READ_ONLY_DENY = [
 ];
 async function runEmbedded(api, agentId, sessionId, message, timeoutMs, streaming, inactivityMs, readOnly, toolsDeny) {
     // Load config so we can resolve agent dirs and providers correctly.
-    const origConfig = await api.runtime.config.loadConfig();
+    // current() returns the same process snapshot the removed loadConfig()
+    // returned, typed DeepReadonly. It is never mutated here: every edit below
+    // happens on a JSON clone, so dropping the readonly modifier to hand it to
+    // runEmbeddedAgent (which takes OpenClawConfig) is safe.
+    const origConfig = api.runtime.config.current();
     let config = origConfig;
     let configAny = config;
     // ── Read-only enforcement ──────────────────────────────────────────
@@ -197,7 +201,7 @@ async function runEmbedded(api, agentId, sessionId, message, timeoutMs, streamin
     // Derive a friendly label from cli_ tool names: cli_codex→"Codex", cli_claude→"Claude"
     const cliLabel = (name) => name.startsWith("cli_") ? name.slice(4).charAt(0).toUpperCase() + name.slice(5) : name;
     watchdog.start();
-    const result = await api.runtime.agent.runEmbeddedPiAgent({
+    const result = await api.runtime.agent.runEmbeddedAgent({
         sessionId,
         sessionFile,
         workspaceDir,

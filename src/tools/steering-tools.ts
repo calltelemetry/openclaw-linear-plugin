@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import { getActiveTmuxSession } from "../infra/tmux-runner.js";
 import { capturePane, shellEscape } from "../infra/tmux.js";

@@ -4,7 +4,7 @@
  * Registered via api.registerCommand(). These commands bypass the AI agent
  * entirely — they read/write dispatch state directly and return formatted text.
  */
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import {
   readDispatchState,
   getActiveDispatch,

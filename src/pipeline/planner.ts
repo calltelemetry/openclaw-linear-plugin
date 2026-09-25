@@ -6,7 +6,7 @@
  * - handlePlannerTurn: processes each user comment during planning
  * - runPlanAudit: validates the plan before finalizing
  */
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { loadRawPromptYaml } from "./pipeline.js";
 import type { LinearAgentApi } from "../api/linear-api.js";
 import { runAgent } from "../agent/agent.js";

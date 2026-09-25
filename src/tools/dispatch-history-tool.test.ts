@@ -76,7 +76,7 @@ function makeCompleted(overrides?: Partial<CompletedDispatch>): CompletedDispatc
 }
 
 const fakeApi = {
-  runtime: { config: { loadConfig: () => ({}) } },
+  runtime: { config: { current: () => ({}) } },
 } as any;
 
 function createTool(pluginConfig?: Record<string, unknown>) {

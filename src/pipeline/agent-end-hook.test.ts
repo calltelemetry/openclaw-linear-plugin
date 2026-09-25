@@ -43,7 +43,7 @@ vi.mock("../infra/observability.js", () => ({
   emitDiagnostic: vi.fn(),
 }));
 
-vi.mock("openclaw/plugin-sdk", () => ({}));
+vi.mock("openclaw/plugin-sdk/core", () => ({}));
 
 // ---------------------------------------------------------------------------
 // Imports (AFTER mocks)

@@ -11,7 +11,7 @@
  * - Prune completed dispatches older than 7 days
  */
 import { existsSync } from "node:fs";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { hydrateFromDispatchState } from "./active-session.js";
 import {
   readDispatchState,

@@ -46,7 +46,7 @@ vi.mock("../infra/observability.js", () => ({
   emitDiagnostic: vi.fn(),
 }));
 
-vi.mock("openclaw/plugin-sdk", () => ({}));
+vi.mock("openclaw/plugin-sdk/core", () => ({}));
 
 // 2026.4: notify.ts may shell out via execFile (async). Mock node:child_process
 // so tests don't actually invoke the real openclaw CLI (which would hang
@@ -543,7 +543,7 @@ describe("E2E dispatch pipeline", () => {
       },
     };
 
-    const fakeRuntime = { config: { loadConfig: vi.fn(async () => ({})) } } as any;
+    const fakeRuntime = { config: { current: vi.fn(() => ({})) } } as any;
     const notify = createNotifierFromConfig(pluginConfig, fakeRuntime);
 
     const configDir = tmpDir();

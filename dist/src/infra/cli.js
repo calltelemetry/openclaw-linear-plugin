@@ -772,11 +772,14 @@ export function registerCli(program, api) {
             return;
         }
         try {
-            const runtimeConfig = api.runtime.config.loadConfig();
+            // current() is the readonly process snapshot (what the removed
+            // loadConfig() returned); clone it before editing, per SDK contract.
+            const runtimeConfig = structuredClone(api.runtime.config.current());
             const pluginEntries = runtimeConfig.plugins?.entries ?? {};
             const linearConfig = pluginEntries["openclaw-linear"]?.config ?? {};
+            const prevNotifications = linearConfig.notifications;
             linearConfig.notifications = {
-                ...linearConfig.notifications,
+                ...(prevNotifications && typeof prevNotifications === "object" ? prevNotifications : {}),
                 targets: newTargets,
             };
             pluginEntries["openclaw-linear"] = {
@@ -784,7 +787,11 @@ export function registerCli(program, api) {
                 config: linearConfig,
             };
             runtimeConfig.plugins = { ...runtimeConfig.plugins, entries: pluginEntries };
-            api.runtime.config.writeConfigFile(runtimeConfig);
+            // Same write the removed writeConfigFile() performed internally.
+            await api.runtime.config.replaceConfigFile({
+                nextConfig: runtimeConfig,
+                afterWrite: { mode: "auto" },
+            });
             console.log("\n  Configuration saved. Restart gateway to apply: systemctl --user restart openclaw-gateway\n");
         }
         catch (err) {

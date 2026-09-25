@@ -14,7 +14,7 @@
  *   dispatch.stats     — Aggregate counts by status and tier
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import {
   readDispatchState,
   getActiveDispatch,
