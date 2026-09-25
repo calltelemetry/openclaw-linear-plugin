@@ -209,7 +209,7 @@ export function resolveOrchestratorWorkspace(api, pluginConfig) {
     const home = homedir();
     const agentId = pluginConfig?.defaultAgentId ?? "default";
     try {
-        const config = api.runtime.config.loadConfig();
+        const config = api.runtime.config.current();
         const agentList = config?.agents?.list;
         const agentEntry = agentList?.find((a) => a.id === agentId);
         return agentEntry?.workspace

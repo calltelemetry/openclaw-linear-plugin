@@ -35,7 +35,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import { runAgent } from "./agent.js";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 function createApi(): OpenClawPluginApi {
   return {
@@ -47,7 +47,7 @@ function createApi(): OpenClawPluginApi {
     },
     runtime: {
       config: {
-        loadConfig: vi.fn().mockReturnValue({ agents: { list: [] } }),
+        current: vi.fn().mockReturnValue({ agents: { list: [] } }),
       },
       system: {
         runCommandWithTimeout: vi.fn().mockResolvedValue({

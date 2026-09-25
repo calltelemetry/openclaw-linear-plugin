@@ -382,7 +382,7 @@ describe("writeDispatchMemory", () => {
 
 describe("resolveOrchestratorWorkspace", () => {
   it("falls back to default on error", () => {
-    const api = { runtime: { config: { loadConfig: () => { throw new Error("no config"); } } } };
+    const api = { runtime: { config: { current: () => { throw new Error("no config"); } } } };
     const result = resolveOrchestratorWorkspace(api);
     expect(result).toContain(".openclaw");
     expect(result).toContain("workspace");
@@ -392,7 +392,7 @@ describe("resolveOrchestratorWorkspace", () => {
     const api = {
       runtime: {
         config: {
-          loadConfig: () => ({
+          current: () => ({
             agents: {
               list: [{ id: "default", workspace: "/custom/ws" }],
             },

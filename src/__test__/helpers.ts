@@ -9,7 +9,7 @@ import { vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { HookContext } from "../pipeline/pipeline.js";
 import type { NotifyFn } from "../infra/notify.js";
 

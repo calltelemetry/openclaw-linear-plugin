@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { LinearAgentApi } from "../api/linear-api.js";
 import { resolveLinearToken, LinearAgentApi as LinearAgentApiClass } from "../api/linear-api.js";
 import { getCurrentSession, getActiveSessionByIdentifier } from "../pipeline/active-session.js";

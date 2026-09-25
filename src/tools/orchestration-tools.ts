@@ -1,4 +1,4 @@
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import { runAgent } from "../agent/agent.js";
 

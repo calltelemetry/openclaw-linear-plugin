@@ -7,7 +7,7 @@
  *
  * Cost: one short agent turn (~300 tokens). Latency: ~2-5s.
  */
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { resolveDefaultAgent } from "../infra/shared-profiles.js";
 
 // ---------------------------------------------------------------------------

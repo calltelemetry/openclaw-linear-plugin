@@ -7,7 +7,7 @@
  *   1. **In-process** — calls `deliverOutboundPayloads` from the gateway's
  *      bundled outbound runtime. Fast (no subprocess), supports Telegram
  *      HTML and Discord channelData embeds. Resolved lazily at first call by
- *      scanning `openclaw/dist/deliver-*.js` for the matching export, since
+ *      scanning `openclaw/dist/deliver-*.{js,mjs}` for the matching export, since
  *      the bundle file name carries a build-time hash and is not in
  *      package.json `exports`.
  *
@@ -27,7 +27,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import type { PluginRuntime, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { PluginRuntime, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { emitDiagnostic } from "./observability.js";
 
 const execFileAsync = promisify(execFile);
@@ -203,7 +203,7 @@ function escapeHtml(s: string): string {
 // any package.json subpath. The function lives in a bundled chunk like
 // `openclaw/dist/deliver-BrOy8-7N.js` whose hash changes per release. We
 // resolve it once at first send by scanning `openclaw/dist/` for any file
-// matching `^deliver-[A-Za-z0-9_-]+\.js$` whose ESM exports include
+// matching `^deliver-[A-Za-z0-9_-]+\.m?js$` whose ESM exports include
 // `deliverOutboundPayloads`. The result is cached for the process lifetime.
 // On any failure (fresh install, hash regex miss, breaking signature change)
 // we silently fall through to the CLI subprocess path so notify never
@@ -235,6 +235,15 @@ export function _resetDeliverResolver(forceResult?: DeliverModule | null): void 
   }
 }
 
+/**
+ * Whether a file in `openclaw/dist/` is a candidate outbound-deliver chunk.
+ * Bundled chunks shipped as `.js` through openclaw 2026.7 and as `.mjs`
+ * from 2026.9.
+ */
+export function isDeliverChunkFile(fileName: string): boolean {
+  return /^deliver-[A-Za-z0-9_-]+\.m?js$/.test(fileName);
+}
+
 async function resolveInProcessDeliver(): Promise<DeliverModule | null> {
   if (_deliverModulePromise) return _deliverModulePromise;
   _deliverModulePromise = (async () => {
@@ -243,7 +252,7 @@ async function resolveInProcessDeliver(): Promise<DeliverModule | null> {
       const mainEntry = _require.resolve("openclaw");
       const distDir = dirname(mainEntry);
       const files = await readdir(distDir);
-      const candidates = files.filter((f) => /^deliver-[A-Za-z0-9_-]+\.js$/.test(f));
+      const candidates = files.filter(isDeliverChunkFile);
       for (const file of candidates) {
         try {
           const url = pathToFileURL(join(distDir, file)).href;
@@ -308,7 +317,7 @@ export async function sendToTarget(
   const mod = await resolveInProcessDeliver();
   if (mod) {
     try {
-      const cfg = await runtime.config.loadConfig();
+      const cfg = runtime.config.current();
       await mod.deliverOutboundPayloads({
         cfg,
         channel: ch,

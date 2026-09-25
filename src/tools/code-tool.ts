@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import { getCurrentSession, getActiveSessionByAgentId } from "../pipeline/active-session.js";

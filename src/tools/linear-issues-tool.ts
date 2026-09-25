@@ -1,4 +1,4 @@
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import { LinearAgentApi, resolveLinearToken } from "../api/linear-api.js";
 import { isValidIssueId as isValidLinearId } from "../infra/validation.js";

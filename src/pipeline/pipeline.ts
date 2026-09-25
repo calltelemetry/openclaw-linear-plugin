@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { LinearAgentApi, ActivityContent } from "../api/linear-api.js";
 import { runAgent } from "../agent/agent.js";
 import { setActiveSession, clearActiveSession } from "./active-session.js";

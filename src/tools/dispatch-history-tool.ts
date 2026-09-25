@@ -7,7 +7,7 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import { readDispatchState, listActiveDispatches, type ActiveDispatch, type CompletedDispatch } from "../pipeline/dispatch-state.js";
 import { resolveOrchestratorWorkspace } from "../pipeline/artifacts.js";

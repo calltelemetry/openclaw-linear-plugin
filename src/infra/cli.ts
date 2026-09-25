@@ -2,7 +2,7 @@
  * cli.ts — CLI registration for `openclaw openclaw-linear auth` and `openclaw openclaw-linear status`.
  */
 import type { Command } from "commander";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { createInterface } from "node:readline";
 import { exec } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -857,11 +857,14 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
       }
 
       try {
-        const runtimeConfig = api.runtime.config.loadConfig() as Record<string, any>;
+        // current() is the readonly process snapshot (what the removed
+        // loadConfig() returned); clone it before editing, per SDK contract.
+        const runtimeConfig: OpenClawConfig = structuredClone(api.runtime.config.current()) as OpenClawConfig;
         const pluginEntries = runtimeConfig.plugins?.entries ?? {};
         const linearConfig = pluginEntries["openclaw-linear"]?.config ?? {};
+        const prevNotifications = linearConfig.notifications;
         linearConfig.notifications = {
-          ...linearConfig.notifications,
+          ...(prevNotifications && typeof prevNotifications === "object" ? prevNotifications : {}),
           targets: newTargets,
         };
         pluginEntries["openclaw-linear"] = {
@@ -869,7 +872,11 @@ export function registerCli(program: Command, api: OpenClawPluginApi): void {
           config: linearConfig,
         };
         runtimeConfig.plugins = { ...runtimeConfig.plugins, entries: pluginEntries };
-        api.runtime.config.writeConfigFile(runtimeConfig);
+        // Same write the removed writeConfigFile() performed internally.
+        await api.runtime.config.replaceConfigFile({
+          nextConfig: runtimeConfig,
+          afterWrite: { mode: "auto" },
+        });
         console.log("\n  Configuration saved. Restart gateway to apply: systemctl --user restart openclaw-gateway\n");
       } catch (err) {
         console.error(`\n  Failed to save config: ${err instanceof Error ? err.message : String(err)}`);

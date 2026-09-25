@@ -6,7 +6,7 @@
  *
  * Pattern: `[linear:diagnostic] {...json...}`
  */
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 export type DiagnosticEvent =
   | "webhook_received"
