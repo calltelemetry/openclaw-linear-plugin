@@ -1870,6 +1870,10 @@ For detailed diagnostics, see [docs/troubleshooting.md](docs/troubleshooting.md)
 
 ---
 
+## Code review
+
+Pull requests are also reviewed automatically by Review Yeti (the Call Telemetry review GitHub App). Its `Review Yeti` check is advisory and is not a required status check.
+
 ## License
 
 MIT
