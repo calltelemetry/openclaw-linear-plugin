@@ -1877,3 +1877,5 @@ Pull requests are also reviewed automatically by Review Yeti (the Call Telemetry
 ## License
 
 MIT
+
+<!-- merge-queue canary 2026-10-25 -->
